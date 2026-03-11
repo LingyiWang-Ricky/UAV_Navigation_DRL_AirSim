@@ -46,6 +46,12 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.keyboard_debug = cfg.getboolean('options', 'keyboard_debug')
         self.generate_q_map = cfg.getboolean('options', 'generate_q_map')
         self.perception_type = cfg.get('options', 'perception')
+        self.num_uavs = cfg.getint('options', 'num_uavs', fallback=1)
+        uav_names_raw = cfg.get('options', 'uav_names', fallback='Drone1,Drone2')
+        self.uav_names = [name.strip() for name in uav_names_raw.split(',') if name.strip()]
+        if len(self.uav_names) < self.num_uavs:
+            self.uav_names += [f"Drone{i+1}" for i in range(len(self.uav_names), self.num_uavs)]
+        self._active_uav_idx = None
 
         # create LGMD agent
         if self.perception_type == 'lgmd':
@@ -57,13 +63,20 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         # set dynamics
         if self.dynamic_name == 'SimpleFixedwing':
-            self.dynamic_model = FixedwingDynamicsSimple(cfg)
+            self.dynamic_models = [FixedwingDynamicsSimple(cfg)]
         elif self.dynamic_name == 'SimpleMultirotor':
-            self.dynamic_model = MultirotorDynamicsSimple(cfg)
+            self.dynamic_models = [
+                MultirotorDynamicsSimple(cfg, vehicle_name=self.uav_names[i] if self.num_uavs > 1 else "")
+                for i in range(self.num_uavs)
+            ]
         elif self.dynamic_name == 'Multirotor':
-            self.dynamic_model = MultirotorDynamicsAirsim(cfg)
+            self.dynamic_models = [
+                MultirotorDynamicsAirsim(cfg, vehicle_name=self.uav_names[i] if self.num_uavs > 1 else "")
+                for i in range(self.num_uavs)
+            ]
         else:
             raise Exception("Invalid dynamic_name!", self.dynamic_name)
+        self.dynamic_model = self.dynamic_models[0]
 
         # set start and goal position according to different environment
         if self.env_name == 'NH_center':
@@ -156,6 +169,17 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         else:
             raise Exception("Invalid env_name!", self.env_name)
 
+        if self.num_uavs > 1:
+            for i, dynamic_model in enumerate(self.dynamic_models[1:], start=1):
+                start_position = list(self.dynamic_model.start_position)
+                start_position[1] += i * 2.0
+                dynamic_model.start_position = start_position
+                dynamic_model.start_random_angle = self.dynamic_model.start_random_angle
+                dynamic_model.goal_position = list(self.dynamic_model.goal_position)
+                dynamic_model.goal_distance = self.dynamic_model.goal_distance
+                dynamic_model.goal_random_angle = self.dynamic_model.goal_random_angle
+                dynamic_model.goal_rect = self.dynamic_model.goal_rect
+
         self.client = self.dynamic_model.client
         self.state_feature_length = self.dynamic_model.state_feature_length
         self.cnn_feature_length = self.cfg.getint('options', 'cnn_feature_num')
@@ -181,15 +205,22 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if self.perception_type == 'vector' or self.perception_type == 'lgmd':
             self.observation_space = spaces.Box(low=0, high=1,
                                                 shape=(1,
-                                                       self.cnn_feature_length + self.state_feature_length),
+                                                       self.num_uavs * (self.cnn_feature_length + self.state_feature_length)),
                                                 dtype=np.float32)
         else:
             self.observation_space = spaces.Box(low=0, high=255,
                                                 shape=(self.screen_height,
-                                                       self.screen_width, 2),
+                                                       self.screen_width, 2 * self.num_uavs),
                                                 dtype=np.uint8)
 
-        self.action_space = self.dynamic_model.action_space
+        if self.num_uavs == 1:
+            self.action_space = self.dynamic_model.action_space
+        else:
+            base_action_space = self.dynamic_model.action_space
+            self.action_space = spaces.Box(
+                low=np.tile(base_action_space.low, self.num_uavs),
+                high=np.tile(base_action_space.high, self.num_uavs),
+                dtype=np.float32)
 
         self.reward_type = None
         try:
@@ -200,13 +231,17 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
     def reset(self):
         # reset state
-        self.dynamic_model.reset()
+        for dynamic_model in self.dynamic_models:
+            dynamic_model.reset()
 
         self.episode_num += 1
         self.step_num = 0
         self.cumulated_episode_reward = 0
-        self.dynamic_model.goal_distance = self.dynamic_model.get_distance_to_goal_2d()
-        self.previous_distance_from_des_point = self.dynamic_model.goal_distance
+        self.goal_distance_list = []
+        for dynamic_model in self.dynamic_models:
+            dynamic_model.goal_distance = dynamic_model.get_distance_to_goal_2d()
+            self.goal_distance_list.append(dynamic_model.goal_distance)
+        self.previous_distance_from_des_point = float(np.mean(self.goal_distance_list))
 
         self.trajectory_list = []
 
@@ -216,14 +251,24 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
     def step(self, action):
         # set action
-        if self.dynamic_name == 'SimpleFixedwing':
+        if self.num_uavs == 1 and self.dynamic_name == 'SimpleFixedwing':
             # add step to calculate pitch flap deg Fixed wing only
             self.dynamic_model.set_action(action, self.step_num)
-        else:
+        elif self.num_uavs == 1:
             self.dynamic_model.set_action(action)
+        else:
+            action = np.asarray(action)
+            action_dim = self.dynamic_models[0].action_space.shape[0]
+            position_ue4 = []
+            for i, dynamic_model in enumerate(self.dynamic_models):
+                action_i = action[i*action_dim:(i+1)*action_dim]
+                dynamic_model.set_action(action_i)
+                position_ue4.append(dynamic_model.get_position())
+            self.trajectory_list.append(position_ue4)
 
-        position_ue4 = self.dynamic_model.get_position()
-        self.trajectory_list.append(position_ue4)
+        if self.num_uavs == 1:
+            position_ue4 = self.dynamic_model.get_position()
+            self.trajectory_list.append(position_ue4)
 
         # get new obs
         obs = self.get_obs()
@@ -238,9 +283,11 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             print(info)
 
         # ----------------compute reward---------------------------
-        if self.dynamic_name == 'SimpleFixedwing':
+        if self.num_uavs == 1 and self.dynamic_name == 'SimpleFixedwing':
             # reward = self.compute_reward_fixedwing(done, action)
             reward = self.compute_reward_final_fixedwing(done, action)
+        elif self.num_uavs > 1:
+            reward = self.compute_multi_uav_reward(done, action)
         elif self.reward_type == 'reward_with_action':
             reward = self.compute_reward_with_action(done, action)
         elif self.reward_type == 'reward_new':
@@ -304,6 +351,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
 # ! -------------------------get obs------------------------------------------
     def get_obs(self):
+        if self.num_uavs > 1:
+            self.min_distance_to_obstacles_all = []
+            if self.perception_type == 'vector':
+                obs_all = [self.get_obs_vector_single(dynamic_model) for dynamic_model in self.dynamic_models]
+                return np.concatenate(obs_all, axis=1)
+            obs_all = [self.get_obs_image_single(dynamic_model) for dynamic_model in self.dynamic_models]
+            return np.concatenate(obs_all, axis=2)
+
         if self.perception_type == 'vector':
             obs = self.get_obs_vector()
         elif self.perception_type == 'lgmd':
@@ -312,6 +367,50 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             obs = self.get_obs_image()
 
         return obs
+
+    def get_obs_image_single(self, dynamic_model):
+        image = self.get_depth_image(client=dynamic_model.client, vehicle_name=getattr(dynamic_model, 'vehicle_name', ''))
+        self.min_distance_to_obstacles_all.append(image.min())
+        image_resize = cv2.resize(image, (self.screen_width,
+                                          self.screen_height))
+        image_scaled = np.clip(
+            image_resize, 0, self.max_depth_meters) / self.max_depth_meters * 255
+        image_scaled = 255 - image_scaled
+        image_uint8 = image_scaled.astype(np.uint8)
+
+        state_feature_array = np.zeros((self.screen_height, self.screen_width))
+        state_feature = dynamic_model._get_state_feature()
+        state_feature_array[0, 0:self.state_feature_length] = state_feature
+
+        image_with_state = np.array([image_uint8, state_feature_array])
+        image_with_state = image_with_state.swapaxes(0, 2)
+        image_with_state = image_with_state.swapaxes(0, 1)
+        return image_with_state
+
+    def get_obs_vector_single(self, dynamic_model):
+        image = self.get_depth_image(client=dynamic_model.client, vehicle_name=getattr(dynamic_model, 'vehicle_name', ''))
+        self.min_distance_to_obstacles_all.append(image.min())
+        image_scaled = np.clip(image, 0, self.max_depth_meters) / self.max_depth_meters * 255
+        image_scaled = 255 - image_scaled
+        image_uint8 = image_scaled.astype(np.uint8)
+
+        image_obs = image_uint8
+        split_row = 1
+        split_col = 5
+
+        v_split_list = np.vsplit(image_obs, split_row)
+
+        split_final = []
+        for i in range(split_row):
+            h_split_list = np.hsplit(v_split_list[i], split_col)
+            for j in range(split_col):
+                split_final.append(h_split_list[j].max())
+
+        img_feature = np.array(split_final) / 255.0
+        state_feature = dynamic_model._get_state_feature() / 255
+        feature_all = np.concatenate((img_feature, state_feature), axis=0)
+        feature_all = np.reshape(feature_all, (1, len(feature_all)))
+        return feature_all
 
     def get_obs_image(self):
         # Normal mode: get depth image then transfer to matrix with state
@@ -371,17 +470,30 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         return depth_meter, img_gray
 
-    def get_depth_image(self):
+    def get_depth_image(self, client=None, vehicle_name=''):
+        if client is None:
+            client = self.client
 
-        responses = self.client.simGetImages([
-            airsim.ImageRequest("0", airsim.ImageType.DepthVis, True)
-        ])
+        try:
+            responses = client.simGetImages([
+                airsim.ImageRequest("0", airsim.ImageType.DepthVis, True)
+            ], vehicle_name=vehicle_name)
+        except TypeError:
+            responses = client.simGetImages([
+                airsim.ImageRequest("0", airsim.ImageType.DepthVis, True)
+            ])
 
         # check observation
         while responses[0].width == 0:
             print("get_image_fail...")
-            responses = self.client.simGetImages(
-                airsim.ImageRequest("0", airsim.ImageType.DepthVis, True))
+            try:
+                responses = client.simGetImages([
+                    airsim.ImageRequest("0", airsim.ImageType.DepthVis, True)
+                ], vehicle_name=vehicle_name)
+            except TypeError:
+                responses = client.simGetImages([
+                    airsim.ImageRequest("0", airsim.ImageType.DepthVis, True)
+                ])
 
         depth_img = airsim.list_to_2d_float_array(
             responses[0].image_data_float, responses[0].width,
@@ -471,6 +583,28 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         feature_all = np.reshape(feature_all, (1, len(feature_all)))
 
         return feature_all
+
+    def compute_multi_uav_reward(self, done, action):
+        action = np.asarray(action)
+        action_dim = self.dynamic_models[0].action_space.shape[0]
+        reward_list = []
+        for i in range(self.num_uavs):
+            self._active_uav_idx = i
+            action_i = action[i*action_dim:(i+1)*action_dim]
+            if self.reward_type == 'reward_with_action':
+                reward_i = self.compute_reward_with_action(done, action_i)
+            elif self.reward_type == 'reward_new':
+                reward_i = self.compute_reward_multirotor_new(done, action_i)
+            elif self.reward_type == 'reward_lqr':
+                reward_i = self.compute_reward_lqr(done, action_i)
+            elif self.reward_type == 'reward_final':
+                reward_i = self.compute_reward_final(done, action_i)
+            else:
+                reward_i = self.compute_reward(done, action_i)
+            reward_list.append(reward_i)
+
+        self._active_uav_idx = None
+        return float(np.mean(reward_list))
 # ! ---------------------calculate rewards-------------------------------------
 
     def compute_reward(self, done, action):
@@ -877,34 +1011,59 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         Check if the Drone is inside the Workspace defined
         """
         is_not_inside = False
-        current_position = self.dynamic_model.get_position()
+        model_list = self.dynamic_models
+        if self._active_uav_idx is not None:
+            model_list = [self.dynamic_models[self._active_uav_idx]]
 
-        if current_position[0] < self.work_space_x[0] or current_position[0] > self.work_space_x[1] or \
-            current_position[1] < self.work_space_y[0] or current_position[1] > self.work_space_y[1] or \
-                current_position[2] < self.work_space_z[0] or current_position[2] > self.work_space_z[1]:
-            is_not_inside = True
+        for model in model_list:
+            current_position = model.get_position()
+            if current_position[0] < self.work_space_x[0] or current_position[0] > self.work_space_x[1] or \
+                current_position[1] < self.work_space_y[0] or current_position[1] > self.work_space_y[1] or \
+                    current_position[2] < self.work_space_z[0] or current_position[2] > self.work_space_z[1]:
+                is_not_inside = True
+                break
 
         return is_not_inside
 
     def is_in_desired_pose(self):
-        in_desired_pose = False
-        if self.get_distance_to_goal_3d() < self.accept_radius:
-            in_desired_pose = True
+        if self._active_uav_idx is not None:
+            return self.get_distance_to_goal_3d() < self.accept_radius
+
+        in_desired_pose = True
+        for i in range(self.num_uavs):
+            self._active_uav_idx = i
+            if self.get_distance_to_goal_3d() >= self.accept_radius:
+                in_desired_pose = False
+                break
+        self._active_uav_idx = None
 
         return in_desired_pose
 
     def is_crashed(self):
         is_crashed = False
-        collision_info = self.client.simGetCollisionInfo()
-        if collision_info.has_collided or self.min_distance_to_obstacles < self.crash_distance:
-            is_crashed = True
+        model_indices = list(range(self.num_uavs))
+        if self._active_uav_idx is not None:
+            model_indices = [self._active_uav_idx]
+
+        for i in model_indices:
+            dynamic_model = self.dynamic_models[i]
+            collision_info = dynamic_model.client.simGetCollisionInfo(vehicle_name=getattr(dynamic_model, 'vehicle_name', ''))
+            min_distance = self.min_distance_to_obstacles if self.num_uavs == 1 else self.min_distance_to_obstacles_all[i]
+            if collision_info.has_collided or min_distance < self.crash_distance:
+                is_crashed = True
+                break
 
         return is_crashed
 
 # ! ----------- useful functions-------------------------------------------
     def get_distance_to_goal_3d(self):
-        current_pose = self.dynamic_model.get_position()
-        goal_pose = self.dynamic_model.goal_position
+        if self._active_uav_idx is None:
+            current_pose = self.dynamic_model.get_position()
+            goal_pose = self.dynamic_model.goal_position
+        else:
+            dynamic_model = self.dynamic_models[self._active_uav_idx]
+            current_pose = dynamic_model.get_position()
+            goal_pose = dynamic_model.goal_position
         relative_pose_x = current_pose[0] - goal_pose[0]
         relative_pose_y = current_pose[1] - goal_pose[1]
         relative_pose_z = current_pose[2] - goal_pose[2]
@@ -950,7 +1109,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.client.simPrintLogMessage(
             'Feature_raw: ', str(self.dynamic_model.state_raw))
         self.client.simPrintLogMessage(
-            'Min_depth: ', str(self.min_distance_to_obstacles))
+            'Min_depth: ', str(self.min_distance_to_obstacles if self.num_uavs == 1 else self.min_distance_to_obstacles_all))
 
     def set_pyqt_signal_fixedwing(self, action, reward, done):
         """

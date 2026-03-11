@@ -4,6 +4,20 @@
   "SimMode": "Multirotor",
   "ViewMode": "NoDisplay",
   "ClockSpeed": 20,
+  "Vehicles": {
+    "Drone1": {
+      "VehicleType": "SimpleFlight",
+      "X": 0,
+      "Y": 0,
+      "Z": 0
+    },
+    "Drone2": {
+      "VehicleType": "SimpleFlight",
+      "X": 2,
+      "Y": 0,
+      "Z": 0
+    }
+  },
   "SubWindows": [
     {"WindowID": 0, "CameraID": 0, "ImageType": 0, "Visible": true},
     {"WindowID": 1, "CameraID": 0, "ImageType": 3, "Visible": false},

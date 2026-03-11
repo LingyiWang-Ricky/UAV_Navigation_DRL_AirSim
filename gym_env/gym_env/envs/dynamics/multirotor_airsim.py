@@ -9,7 +9,7 @@ class MultirotorDynamicsAirsim():
     The controller is AirSim Simple Flight (https://microsoft.github.io/AirSim/simple_flight/)
     API: client.moveByVelocityZAsync(v_x, v_y, v_z, yaw_rate) is used to control
     '''
-    def __init__(self, cfg) -> None:
+    def __init__(self, cfg, vehicle_name="") -> None:
         
         # config
         self.navigation_3d = cfg.getboolean('options', 'navigation_3d')
@@ -20,8 +20,9 @@ class MultirotorDynamicsAirsim():
         # AirSim Client
         self.client = airsim.MultirotorClient()
         self.client.confirmConnection()
-        self.client.enableApiControl(True)
-        self.client.armDisarm(True)
+        self.vehicle_name = vehicle_name
+        self.client.enableApiControl(True, vehicle_name=self.vehicle_name)
+        self.client.armDisarm(True, vehicle_name=self.vehicle_name)
 
         # start and goal position
         self.start_position = [0, 0, 0]
@@ -79,19 +80,19 @@ class MultirotorDynamicsAirsim():
         # reset start
         yaw_noise = self.start_random_angle * np.random.random()
         # set airsim pose
-        pose = self.client.simGetVehiclePose()
+        pose = self.client.simGetVehiclePose(vehicle_name=self.vehicle_name)
         pose.position.x_val = self.start_position[0]
         pose.position.y_val = self.start_position[1]
         pose.position.z_val = - self.start_position[2]
         pose.orientation = airsim.to_quaternion(0, 0, yaw_noise)
-        self.client.simSetVehiclePose(pose, True)
+        self.client.simSetVehiclePose(pose, True, vehicle_name=self.vehicle_name)
 
         self.client.simPause(False)
-        self.client.enableApiControl(True)
-        self.client.armDisarm(True)
+        self.client.enableApiControl(True, vehicle_name=self.vehicle_name)
+        self.client.armDisarm(True, vehicle_name=self.vehicle_name)
 
         # take off
-        self.client.moveToZAsync(-self.start_position[2], 2).join()
+        self.client.moveToZAsync(-self.start_position[2], 2, vehicle_name=self.vehicle_name).join()
 
         self.client.simPause(True)
 
@@ -119,14 +120,16 @@ class MultirotorDynamicsAirsim():
         if len(action) == 2:
             self.client.moveByVelocityZAsync(vx_local_sp, vy_local_sp, -self.start_position[2], self.dt,
                                             drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
-                                            yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=math.degrees(self.yaw_rate_sp))).join()
+                                            yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=math.degrees(self.yaw_rate_sp)),
+                                            vehicle_name=self.vehicle_name).join()
             # self.client.moveByVelocityZAsync(vx_local_sp, vy_local_sp, -self.start_position[2], self.dt,
             #                                 drivetrain=airsim.DrivetrainType.ForwardOnly,
             #                                 yaw_mode=airsim.YawMode(is_rate=False, yaw_or_rate=math.degrees(0))).join()
         elif len(action) == 3:
             self.client.moveByVelocityAsync(vx_local_sp, vy_local_sp, -self.v_z_sp, self.dt,
                                             drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
-                                            yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=math.degrees(self.yaw_rate_sp))).join()
+                                            yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=math.degrees(self.yaw_rate_sp)),
+                                            vehicle_name=self.vehicle_name).join()
                         
         self.client.simPause(True)
 
@@ -256,11 +259,11 @@ class MultirotorDynamicsAirsim():
         return yaw_error
 
     def get_position(self):
-        position = self.client.simGetVehiclePose().position 
+        position = self.client.simGetVehiclePose(vehicle_name=self.vehicle_name).position 
         return [position.x_val, position.y_val, -position.z_val]
 
     def get_velocity(self):
-        states = self.client.getMultirotorState()
+        states = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
         linear_velocity = states.kinematics_estimated.linear_velocity
         angular_velocity = states.kinematics_estimated.angular_velocity
 
@@ -271,7 +274,7 @@ class MultirotorDynamicsAirsim():
         return [velocity_xy, -velocity_z, yaw_rate]
 
     def get_attitude(self):
-        self.state_current_attitude = self.client.simGetVehiclePose().orientation
+        self.state_current_attitude = self.client.simGetVehiclePose(vehicle_name=self.vehicle_name).orientation
         return airsim.to_eularian_angles(self.state_current_attitude)
 
     def get_attitude_cmd(self):
