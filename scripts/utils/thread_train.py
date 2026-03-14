@@ -62,6 +62,8 @@ class TrainingThread(QtCore.QThread):
 
     def run(self):
         print("run training thread")
+        print('TrainingThread config -> num_uavs:', self.cfg.get('options', 'num_uavs', fallback='(missing, fallback=1)'),
+              'uav_names:', self.cfg.get('options', 'uav_names', fallback='(missing)'))
 
         # Initialize env config in worker thread (may connect to AirSim)
         self.env.set_config(self.cfg)

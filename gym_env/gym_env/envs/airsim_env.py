@@ -62,6 +62,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         print('Environment: ', self.env_name, "Dynamics: ", self.dynamic_name,
               'Perception: ', self.perception_type)
+        if self.num_uavs <= 1 and self.dynamic_name in ['Multirotor', 'SimpleMultirotor']:
+            print('[Warning] num_uavs <= 1. Multi-UAV mode is NOT enabled. Check config path and [options] num_uavs.')
+        else:
+            print(f'[Info] Multi-UAV mode enabled: {self.num_uavs} UAVs -> {self.uav_names[:self.num_uavs]}')
 
         # set dynamics
         if self.dynamic_name == 'SimpleFixedwing':
@@ -279,11 +283,6 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self.trajectory_list.append(position_ue4)
             self.last_action_split_list = action_split_list
             self.last_position_list = position_ue4
-            for i, dynamic_model in enumerate(self.dynamic_models):
-                action_i = action[i*action_dim:(i+1)*action_dim]
-                dynamic_model.set_action(action_i)
-                position_ue4.append(dynamic_model.get_position())
-            self.trajectory_list.append(position_ue4)
 
             if self.step_num % 50 == 0:
                 print(f"multi-uav step {self.step_num} action={np.array(action_split_list)} pos={np.array(position_ue4)}")
