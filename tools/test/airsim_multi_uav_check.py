@@ -10,6 +10,17 @@ import socket
 import airsim
 
 
+def scan_open_ports(host: str, ports, timeout_s: float):
+    open_ports = []
+    for p in ports:
+        try:
+            with socket.create_connection((host, p), timeout=timeout_s):
+                open_ports.append(p)
+        except OSError:
+            continue
+    return open_ports
+
+
 def check_vehicle(client, vehicle_name: str) -> bool:
     ok = True
     print(f"\n[Check] {vehicle_name}")
@@ -116,6 +127,24 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"Connection failed: {exc}")
         print("Hint: check SimMode=Multirotor and whether RPC server is listening.")
+        common_ports = list(range(41451, 41461))
+        open_ports = scan_open_ports(args.host, common_ports, timeout_s=0.2)
+        if open_ports:
+            print(f"Detected open local ports in [41451-41460]: {open_ports}")
+            if args.port not in open_ports:
+                print(
+                    "Your configured --port is not open. "
+                    "Try one of the detected ports and re-run the checker."
+                )
+            else:
+                print(
+                    "Configured port is open but AirSim handshake timed out. "
+                    "Usually this means the service on that port is not AirSim yet, "
+                    "or UE scene has not fully loaded."
+                )
+        else:
+            print("No common AirSim RPC ports are open on localhost.")
+            print("Please start UE/AirSim scene first and wait until world fully loads.")
         return 2
 
     all_ok = True

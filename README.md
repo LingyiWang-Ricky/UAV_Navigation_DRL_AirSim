@@ -203,6 +203,12 @@ python tools/test/airsim_multi_uav_check.py --host 127.0.0.1 --port 41451 --vehi
 
 If this check fails, fix AirSim `settings.json` vehicles and simulator startup first.
 
+If you see `Connection failed: Request timed out`:
+
+- Wait for UE/AirSim scene to fully load, then run the checker again.
+- Ensure your `Documents/AirSim/settings.json` is actually the one used by AirSim.
+- Verify RPC port. The checker now prints detected open ports in `41451-41460` when handshake fails.
+
 ## GUI for training and evaluation
 
 ![img](resources/figures/gui_for_train_and_eval.png)
