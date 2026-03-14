@@ -53,6 +53,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if len(self.uav_names) < self.num_uavs:
             self.uav_names += [f"Drone{i+1}" for i in range(len(self.uav_names), self.num_uavs)]
         self._active_uav_idx = None
+        self._resolve_uav_names_with_airsim()
         print(f"UAV setup -> num_uavs={self.num_uavs}, uav_names={self.uav_names[:self.num_uavs]}, start_separation={self.uav_start_separation}")
 
         # create LGMD agent
@@ -83,6 +84,11 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         else:
             raise Exception("Invalid dynamic_name!", self.dynamic_name)
         self.dynamic_model = self.dynamic_models[0]
+
+        if self.num_uavs > 1 and self.dynamic_name in ['Multirotor', 'SimpleMultirotor']:
+            for i, model in enumerate(self.dynamic_models):
+                model_name = getattr(model, 'vehicle_name', f'UAV-{i+1}')
+                print(f"[UAV Mapping] idx={i} -> vehicle_name='{model_name}'")
 
         # set start and goal position according to different environment
         if self.env_name == 'NH_center':
@@ -235,6 +241,46 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         except NoOptionError:
             self.reward_type = None
 
+
+    def _resolve_uav_names_with_airsim(self):
+        """Validate configured UAV names against AirSim and auto-remap when needed."""
+        if self.num_uavs <= 1 or self.dynamic_name not in ['Multirotor', 'SimpleMultirotor']:
+            return
+
+        try:
+            probe_client = airsim.MultirotorClient()
+            probe_client.confirmConnection()
+
+            if hasattr(probe_client, 'listVehicles'):
+                available_vehicles = list(probe_client.listVehicles())
+            elif hasattr(probe_client, 'simListVehicles'):
+                available_vehicles = list(probe_client.simListVehicles())
+            else:
+                available_vehicles = []
+
+            if not available_vehicles:
+                print('[Warning] AirSim did not return vehicle list. Keep config uav_names as-is.')
+                return
+
+            configured_names = self.uav_names[:self.num_uavs]
+            missing_names = [name for name in configured_names if name not in available_vehicles]
+            print(f"AirSim vehicles: {available_vehicles}, configured: {configured_names}")
+
+            if missing_names:
+                print(f"[Warning] Configured UAV names not found in AirSim: {missing_names}.")
+                if len(available_vehicles) >= self.num_uavs:
+                    self.uav_names = available_vehicles[:self.num_uavs]
+                    print(f"[Fix] Auto-remap uav_names to AirSim order: {self.uav_names}")
+                else:
+                    print(f"[Warning] AirSim only has {len(available_vehicles)} vehicles (< num_uavs={self.num_uavs}).")
+            elif len(available_vehicles) < self.num_uavs:
+                print(f"[Warning] AirSim only has {len(available_vehicles)} vehicles (< num_uavs={self.num_uavs}).")
+            else:
+                print('[Info] Configured uav_names validated in AirSim.')
+
+        except Exception as e:
+            print(f"[Warning] Failed to validate uav_names with AirSim: {e}")
+
     def reset(self):
         # reset state
         if self.dynamic_name == 'Multirotor':
@@ -271,13 +317,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         elif self.num_uavs == 1:
             self.dynamic_model.set_action(action)
         else:
-            action = np.asarray(action)
-            action_dim = self.dynamic_models[0].action_space.shape[0]
+            action, action_split_list = self._split_multi_uav_action(action)
             position_ue4 = []
-            action_split_list = []
             for i, dynamic_model in enumerate(self.dynamic_models):
-                action_i = action[i*action_dim:(i+1)*action_dim]
-                action_split_list.append(action_i)
+                action_i = action_split_list[i]
                 dynamic_model.set_action(action_i)
                 position_ue4.append(dynamic_model.get_position())
             self.trajectory_list.append(position_ue4)
@@ -382,6 +425,36 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.total_step += 1
 
         return obs, reward, done, info
+
+    def _split_multi_uav_action(self, action):
+        """Normalize multi-UAV action and split it per UAV.
+
+        Accept action in either flat shape ``(num_uavs * action_dim,)`` or
+        matrix shape ``(num_uavs, action_dim)``.
+        """
+        action_dim = self.dynamic_models[0].action_space.shape[0]
+        action_arr = np.asarray(action, dtype=np.float32)
+
+        if action_arr.ndim == 2:
+            if action_arr.shape == (self.num_uavs, action_dim):
+                action_arr = action_arr.reshape(-1)
+            elif action_arr.shape == (action_dim, self.num_uavs):
+                action_arr = action_arr.T.reshape(-1)
+            else:
+                raise ValueError(
+                    f"Invalid multi-uav action shape {action_arr.shape}, "
+                    f"expected ({self.num_uavs}, {action_dim}) or flat vector."
+                )
+        elif action_arr.ndim != 1:
+            raise ValueError(f"Invalid multi-uav action ndim {action_arr.ndim}, expected 1 or 2.")
+
+        expected_size = self.num_uavs * action_dim
+        if action_arr.size != expected_size:
+            raise ValueError(f"Invalid multi-uav action size {action_arr.size}, expected {expected_size}.")
+
+        action_split_list = [action_arr[i*action_dim:(i+1)*action_dim] for i in range(self.num_uavs)]
+
+        return action_arr, action_split_list
 
     def get_uav_action_position_map(self, action_split_list=None, position_list=None):
         if self.num_uavs <= 1:
@@ -658,6 +731,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             reward_list.append(reward_i)
 
         self._active_uav_idx = None
+        self._resolve_uav_names_with_airsim()
         return float(np.mean(reward_list))
 # ! ---------------------calculate rewards-------------------------------------
 
@@ -1090,6 +1164,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 in_desired_pose = False
                 break
         self._active_uav_idx = None
+        self._resolve_uav_names_with_airsim()
 
         return in_desired_pose
 
@@ -1165,6 +1240,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             action_position_map = info.get('uav_action_position_map', None)
             if action_position_map is not None:
                 self.client.simPrintLogMessage('UAV Action-Pos: ', str(action_position_map))
+                # Also print to Python console for easier debugging outside AirSim HUD.
+                print(f"[Console][EP {self.episode_num} STEP {self.step_num}] UAV Action-Pos: {action_position_map}")
         self.client.simPrintLogMessage(
             'Feature_norm: ', str(self.dynamic_model.state_norm))
         self.client.simPrintLogMessage(
@@ -1205,13 +1282,13 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         action = np.asarray(action)
 
         if self.num_uavs > 1:
-            action_dim = self.dynamic_models[0].action_space.shape[0]
+            action, action_split = self._split_multi_uav_action(action)
             action_output_list = []
             state_output_list = []
             attitude_real_list = []
             attitude_cmd_list = []
             for i, model in enumerate(self.dynamic_models):
-                action_i = action[i*action_dim:(i+1)*action_dim]
+                action_i = action_split[i]
                 state_i = model.state_raw
                 if model.navigation_3d:
                     action_output_i = action_i
