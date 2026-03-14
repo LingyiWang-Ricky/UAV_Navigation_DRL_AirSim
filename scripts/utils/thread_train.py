@@ -51,18 +51,29 @@ class TrainingThread(QtCore.QThread):
         self.project_name = env_name
 
         # make gym environment
+        # NOTE:
+        # Keep __init__ lightweight for GUI responsiveness.
+        # AirSim connection/configuration happens in run() (worker thread),
+        # otherwise UI can freeze before app event loop starts.
         self.env = gym.make('airsim-env-v0')
-        self.env.set_config(self.cfg)
 
-        wandb_name = self.cfg.get(
-            'options', 'policy_name') + '-' + self.cfg.get('options', 'algo')
-        if self.cfg.get('options', 'dynamic_name') == 'SimpleFixedwing':
-            if self.cfg.get('options', 'perception') == "lgmd":
-                wandb_name += '-LGMD'
-            else:
-                wandb_name += '-depth'
-            if self.cfg.getfloat('fixedwing', 'pitch_flap_hz') != 0:
-                wandb_name += '-Flapping'
+    def terminate(self):
+        print('TrainingThread terminated')
+
+    def run(self):
+        print("run training thread")
+        print('TrainingThread config -> num_uavs:', self.cfg.get('options', 'num_uavs', fallback='(missing, fallback=1)'),
+              'uav_names:', self.cfg.get('options', 'uav_names', fallback='(missing)'))
+
+        # Initialize env config in worker thread (may connect to AirSim)
+        self.env.set_config(self.cfg)
+        cfg_num_uavs = self.cfg.getint('options', 'num_uavs', fallback=1)
+        print(f"Env runtime check -> env.num_uavs={getattr(self.env, 'num_uavs', 'N/A')} cfg.num_uavs={cfg_num_uavs}")
+        if getattr(self.env, 'num_uavs', 1) != cfg_num_uavs:
+            raise RuntimeError(
+                f"num_uavs mismatch: env has {getattr(self.env, 'num_uavs', 'N/A')} "
+                f"but config has {cfg_num_uavs}. Please check loaded config file."
+            )
 
         # wandb
         if self.cfg.getboolean('options', 'use_wandb'):
@@ -73,12 +84,6 @@ class TrainingThread(QtCore.QThread):
                 sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
                 save_code=True,  # optional
             )
-
-    def terminate(self):
-        print('TrainingThread terminated')
-
-    def run(self):
-        print("run training thread")
 
         # ! -----------------------------------init folders-----------------------------------------
         now = datetime.datetime.now()
