@@ -60,18 +60,27 @@ class TrainingThread(QtCore.QThread):
     def terminate(self):
         print('TrainingThread terminated')
 
+    def get_base_env(self):
+        """Unwrap gym wrappers to access the original AirsimGymEnv instance."""
+        env = self.env
+        while hasattr(env, 'env'):
+            env = env.env
+        return env
+
     def run(self):
         print("run training thread")
         print('TrainingThread config -> num_uavs:', self.cfg.get('options', 'num_uavs', fallback='(missing, fallback=1)'),
               'uav_names:', self.cfg.get('options', 'uav_names', fallback='(missing)'))
 
         # Initialize env config in worker thread (may connect to AirSim)
-        self.env.set_config(self.cfg)
+        base_env = self.get_base_env()
+        base_env.set_config(self.cfg)
         cfg_num_uavs = self.cfg.getint('options', 'num_uavs', fallback=1)
-        print(f"Env runtime check -> env.num_uavs={getattr(self.env, 'num_uavs', 'N/A')} cfg.num_uavs={cfg_num_uavs}")
-        if getattr(self.env, 'num_uavs', 1) != cfg_num_uavs:
+        env_num_uavs = getattr(base_env, 'num_uavs', 'N/A')
+        print(f"Env runtime check -> env.num_uavs={env_num_uavs} cfg.num_uavs={cfg_num_uavs}")
+        if env_num_uavs != cfg_num_uavs:
             raise RuntimeError(
-                f"num_uavs mismatch: env has {getattr(self.env, 'num_uavs', 'N/A')} "
+                f"num_uavs mismatch: env has {env_num_uavs} "
                 f"but config has {cfg_num_uavs}. Please check loaded config file."
             )
 
@@ -106,7 +115,7 @@ class TrainingThread(QtCore.QThread):
             self.cfg.write(configfile)
 
         #! -----------------------------------policy selection-------------------------------------
-        feature_num_state = self.env.dynamic_model.state_feature_length
+        feature_num_state = base_env.dynamic_model.state_feature_length
         feature_num_cnn = self.cfg.getint('options', 'cnn_feature_num')
         policy_name = self.cfg.get('options', 'policy_name')
 
@@ -214,8 +223,8 @@ class TrainingThread(QtCore.QThread):
         #! -------------------------------------train-----------------------------------------
         print('start training model')
         total_timesteps = self.cfg.getint('options', 'total_timesteps')
-        self.env.model = model
-        self.env.data_path = data_path
+        base_env.model = model
+        base_env.data_path = data_path
 
         if self.cfg.getboolean('options', 'use_wandb'):
             # if algo == 'TD3' or algo == 'SAC':
