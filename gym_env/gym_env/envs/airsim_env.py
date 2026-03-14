@@ -1154,6 +1154,28 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         if self.num_uavs > 1:
             action_dim = self.dynamic_models[0].action_space.shape[0]
+            action_output_list = []
+            state_output_list = []
+            attitude_real_list = []
+            attitude_cmd_list = []
+            for i, model in enumerate(self.dynamic_models):
+                action_i = action[i*action_dim:(i+1)*action_dim]
+                state_i = model.state_raw
+                if model.navigation_3d:
+                    action_output_i = action_i
+                    state_output_i = state_i
+                else:
+                    action_output_i = np.array([action_i[0], 0, action_i[1]])
+                    state_output_i = np.array([state_i[0], 0, state_i[2], state_i[3], 0, state_i[5]])
+                action_output_list.append(action_output_i)
+                state_output_list.append(state_output_i)
+                attitude_real_list.append(model.get_attitude())
+                attitude_cmd_list.append(model.get_attitude_cmd())
+
+            action_output = np.asarray(action_output_list)
+            state_output = np.asarray(state_output_list)
+            attitude_real = np.asarray(attitude_real_list)
+            attitude_cmd = np.asarray(attitude_cmd_list)
             action = action[0:action_dim]
 
         dynamic_model_plot = self.dynamic_models[0]
@@ -1164,13 +1186,23 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             action_output = action
             state_output = state
         else:
-            action_output = np.array([action[0], 0, action[1]])
-            state_output = np.array([state[0], 0, state[2], state[3], 0, state[5]])
+            dynamic_model_plot = self.dynamic_models[0]
+            # transfer 2D state and action to 3D
+            state = dynamic_model_plot.state_raw
+            if dynamic_model_plot.navigation_3d:
+                action_output = action
+                state_output = state
+            else:
+                action_output = np.array([action[0], 0, action[1]])
+                state_output = np.array([state[0], 0, state[2], state[3], 0, state[5]])
+            attitude_real = np.asarray(dynamic_model_plot.get_attitude())
+            attitude_cmd = np.asarray(dynamic_model_plot.get_attitude_cmd())
 
         self.action_signal.emit(step, action_output)
         self.state_signal.emit(step, state_output)
 
         # other values
+        self.attitude_signal.emit(step, attitude_real, attitude_cmd)
         self.attitude_signal.emit(step, np.asarray(dynamic_model_plot.get_attitude(
         )), np.asarray(dynamic_model_plot.get_attitude_cmd()))
         self.reward_signal.emit(step, reward, self.cumulated_episode_reward)

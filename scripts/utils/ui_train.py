@@ -110,12 +110,18 @@ class TrainingUi(QWidget):
         actionPlotGroupBox = QGroupBox('Action (multirotor)')
         self.v_xy_cmd_list = np.linspace(0, 0, self.max_len)
         self.v_xy_real_list = np.linspace(0, 0, self.max_len)
+        self.v_xy_cmd_list_uav2 = np.linspace(0, 0, self.max_len)
+        self.v_xy_real_list_uav2 = np.linspace(0, 0, self.max_len)
 
         self.v_z_cmd_list = np.linspace(0, 0, self.max_len)
         self.v_z_real_list = np.linspace(0, 0, self.max_len)
+        self.v_z_cmd_list_uav2 = np.linspace(0, 0, self.max_len)
+        self.v_z_real_list_uav2 = np.linspace(0, 0, self.max_len)
 
         self.yaw_rate_cmd_list = np.linspace(0, 0, self.max_len)
         self.yaw_rate_list = np.linspace(0, 0, self.max_len)
+        self.yaw_rate_cmd_list_uav2 = np.linspace(0, 0, self.max_len)
+        self.yaw_rate_list_uav2 = np.linspace(0, 0, self.max_len)
 
         layout = QVBoxLayout()
 
@@ -125,6 +131,8 @@ class TrainingUi(QWidget):
         self.plotWidget_v_xy.showGrid(x=True, y=True)
         self.plot_v_xy = self.plotWidget_v_xy.plot()      # get plot object
         self.plot_v_xy_cmd = self.plotWidget_v_xy.plot()
+        self.plot_v_xy_uav2 = self.plotWidget_v_xy.plot()
+        self.plot_v_xy_cmd_uav2 = self.plotWidget_v_xy.plot()
 
         self.plotWidget_v_z = pg.PlotWidget(title='v_z (m/s)')
         self.plotWidget_v_z.setYRange(max=self.cfg.getfloat(
@@ -132,6 +140,8 @@ class TrainingUi(QWidget):
         self.plotWidget_v_z.showGrid(x=True, y=True)
         self.plot_v_z = self.plotWidget_v_z.plot()
         self.plot_v_z_cmd = self.plotWidget_v_z.plot()
+        self.plot_v_z_uav2 = self.plotWidget_v_z.plot()
+        self.plot_v_z_cmd_uav2 = self.plotWidget_v_z.plot()
 
         self.plotWidget_yaw_rate = pg.PlotWidget(title='yaw_rate (deg/s)')
         self.plotWidget_yaw_rate.setYRange(max=self.cfg.getfloat(
@@ -139,6 +149,8 @@ class TrainingUi(QWidget):
         self.plotWidget_yaw_rate.showGrid(x=True, y=True)
         self.plot_yaw_rate = self.plotWidget_yaw_rate.plot()
         self.plot_yaw_rate_cmd = self.plotWidget_yaw_rate.plot()
+        self.plot_yaw_rate_uav2 = self.plotWidget_yaw_rate.plot()
+        self.plot_yaw_rate_cmd_uav2 = self.plotWidget_yaw_rate.plot()
 
         layout.addWidget(self.plotWidget_v_xy)
         layout.addWidget(self.plotWidget_v_z)
@@ -202,14 +214,30 @@ class TrainingUi(QWidget):
             self.action_cb_multirotor(step, action)
 
     def action_cb_multirotor(self, step, action):
-        self.update_value_list(self.v_xy_cmd_list, action[0])
-        self.update_value_list(self.v_z_cmd_list, action[1])
-        self.update_value_list(self.yaw_rate_cmd_list, math.degrees(action[2]))
+        action_arr = np.asarray(action)
+        if action_arr.ndim == 1:
+            uav1 = action_arr
+            uav2 = None
+        else:
+            uav1 = action_arr[0]
+            uav2 = action_arr[1] if action_arr.shape[0] > 1 else None
+
+        self.update_value_list(self.v_xy_cmd_list, uav1[0])
+        self.update_value_list(self.v_z_cmd_list, uav1[1])
+        self.update_value_list(self.yaw_rate_cmd_list, math.degrees(uav1[2]))
 
         self.plot_v_xy_cmd.setData(self.v_xy_cmd_list, pen=self.pen_blue)
         self.plot_v_z_cmd.setData(self.v_z_cmd_list, pen=self.pen_blue)
         self.plot_yaw_rate_cmd.setData(
             self.yaw_rate_cmd_list, pen=self.pen_blue)
+
+        if uav2 is not None:
+            self.update_value_list(self.v_xy_cmd_list_uav2, uav2[0])
+            self.update_value_list(self.v_z_cmd_list_uav2, uav2[1])
+            self.update_value_list(self.yaw_rate_cmd_list_uav2, math.degrees(uav2[2]))
+            self.plot_v_xy_cmd_uav2.setData(self.v_xy_cmd_list_uav2, pen=self.pen_green)
+            self.plot_v_z_cmd_uav2.setData(self.v_z_cmd_list_uav2, pen=self.pen_green)
+            self.plot_yaw_rate_cmd_uav2.setData(self.yaw_rate_cmd_list_uav2, pen=self.pen_green)
 
     def action_cb_fixed_wing(self, step, action):
         """
@@ -254,28 +282,43 @@ class TrainingUi(QWidget):
         return state_plot_groupbox
 
     def state_cb(self, step, state_raw):
+        state_arr = np.asarray(state_raw)
+        if state_arr.ndim == 1:
+            uav1 = state_arr
+            uav2 = None
+        else:
+            uav1 = state_arr[0]
+            uav2 = state_arr[1] if state_arr.shape[0] > 1 else None
 
         # update state
-        self.update_value_list(self.distance_list, state_raw[0])
-        self.update_value_list(self.vertical_dis_list, state_raw[1])
-        self.update_value_list(self.relative_yaw_list, state_raw[2])
+        self.update_value_list(self.distance_list, uav1[0])
+        self.update_value_list(self.vertical_dis_list, uav1[1])
+        self.update_value_list(self.relative_yaw_list, uav1[2])
 
         self.p1.setData(self.distance_list, pen=self.pen_red)
         self.p2.setData(self.vertical_dis_list, pen=self.pen_red)
         self.p3.setData(self.relative_yaw_list, pen=self.pen_red)
 
         # update action real
-        self.update_value_list(self.v_xy_real_list, state_raw[3])
-        self.update_value_list(self.v_z_real_list, state_raw[4])
+        self.update_value_list(self.v_xy_real_list, uav1[3])
+        self.update_value_list(self.v_z_real_list, uav1[4])
         self.plot_v_xy.setData(self.v_xy_real_list, pen=self.pen_red)
         self.plot_v_z.setData(self.v_z_real_list, pen=self.pen_red)
 
         if self.dynamics == 'SimpleFixedwing':
-            self.update_value_list(self.roll_list_a, state_raw[5])
+            self.update_value_list(self.roll_list_a, uav1[5])
             self.plot_roll_a.setData(self.roll_list_a, pen=self.pen_red)
         else:
-            self.update_value_list(self.yaw_rate_list, state_raw[5])
+            self.update_value_list(self.yaw_rate_list, uav1[5])
             self.plot_yaw_rate.setData(self.yaw_rate_list, pen=self.pen_red)
+
+        if uav2 is not None and self.dynamics != 'SimpleFixedwing':
+            self.update_value_list(self.v_xy_real_list_uav2, uav2[3])
+            self.update_value_list(self.v_z_real_list_uav2, uav2[4])
+            self.update_value_list(self.yaw_rate_list_uav2, uav2[5])
+            self.plot_v_xy_uav2.setData(self.v_xy_real_list_uav2, pen=self.pen_green)
+            self.plot_v_z_uav2.setData(self.v_z_real_list_uav2, pen=self.pen_green)
+            self.plot_yaw_rate_uav2.setData(self.yaw_rate_list_uav2, pen=self.pen_green)
 
 # attitude plot groupbox
     def create_attitude_plot_groupbox(self):
@@ -284,30 +327,36 @@ class TrainingUi(QWidget):
 
         self.roll_list = np.linspace(0, 0, self.max_len)
         self.roll_cmd_list = np.linspace(0, 0, self.max_len)
+        self.roll_list_uav2 = np.linspace(0, 0, self.max_len)
 
         self.pitch_list = np.linspace(0, 0, self.max_len)
         self.pitch_cmd_list = np.linspace(0, 0, self.max_len)
+        self.pitch_list_uav2 = np.linspace(0, 0, self.max_len)
 
         self.yaw_list = np.linspace(0, 0, self.max_len)
         self.yaw_cmd_list = np.linspace(0, 0, self.max_len)
+        self.yaw_list_uav2 = np.linspace(0, 0, self.max_len)
 
         self.pw_roll = pg.PlotWidget(title='roll (deg)')
         self.pw_roll.setYRange(max=45, min=-45)
         self.pw_roll.showGrid(x=True, y=True)
         self.plot_roll = self.pw_roll.plot()
         self.plot_roll_cmd = self.pw_roll.plot()
+        self.plot_roll_uav2 = self.pw_roll.plot()
 
         self.pw_pitch = pg.PlotWidget(title='pitch (deg)')
         self.pw_pitch.setYRange(max=25, min=-25)
         self.pw_pitch.showGrid(x=True, y=True)
         self.plot_pitch = self.pw_pitch.plot()
         self.plot_pitch_cmd = self.pw_pitch.plot()
+        self.plot_pitch_uav2 = self.pw_pitch.plot()
 
         self.pw_yaw = pg.PlotWidget(title='yaw (deg)')
         # self.pw_yaw.setYRange(max=180, min=-180)
         self.pw_yaw.showGrid(x=True, y=True)
         self.plot_yaw = self.pw_yaw.plot()
         self.plot_yaw_cmd = self.pw_yaw.plot()
+        self.plot_yaw_uav2 = self.pw_yaw.plot()
 
         layout.addWidget(self.pw_roll)
         layout.addWidget(self.pw_pitch)
@@ -319,13 +368,29 @@ class TrainingUi(QWidget):
     def attitude_plot_cb(self, step, attitude, attitude_cmd):
         """ plot attitude (pitch, roll, yaw) and the cmd data
         """
-        self.update_value_list(self.pitch_list, math.degrees(attitude[0]))
-        self.update_value_list(self.roll_list, math.degrees(attitude[1]))
-        self.update_value_list(self.yaw_list, math.degrees(attitude[2]))
+        attitude_arr = np.asarray(attitude)
+        if attitude_arr.ndim == 1:
+            uav1 = attitude_arr
+            uav2 = None
+        else:
+            uav1 = attitude_arr[0]
+            uav2 = attitude_arr[1] if attitude_arr.shape[0] > 1 else None
+
+        self.update_value_list(self.pitch_list, math.degrees(uav1[0]))
+        self.update_value_list(self.roll_list, math.degrees(uav1[1]))
+        self.update_value_list(self.yaw_list, math.degrees(uav1[2]))
 
         self.plot_pitch.setData(self.pitch_list, pen=self.pen_red)
         self.plot_roll.setData(self.roll_list, pen=self.pen_red)
         self.plot_yaw.setData(self.yaw_list, pen=self.pen_red)
+
+        if uav2 is not None:
+            self.update_value_list(self.pitch_list_uav2, math.degrees(uav2[0]))
+            self.update_value_list(self.roll_list_uav2, math.degrees(uav2[1]))
+            self.update_value_list(self.yaw_list_uav2, math.degrees(uav2[2]))
+            self.plot_pitch_uav2.setData(self.pitch_list_uav2, pen=self.pen_green)
+            self.plot_roll_uav2.setData(self.roll_list_uav2, pen=self.pen_green)
+            self.plot_yaw_uav2.setData(self.yaw_list_uav2, pen=self.pen_green)
 
 # reward plot groupbox
     def create_reward_plot_groupbox(self):
