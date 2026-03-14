@@ -57,6 +57,7 @@ class TrainingUi(QWidget):
 
         # action, state_feature, attitude, trajectory
         self.dynamics = self.cfg.get('options', 'dynamic_name')
+        self.num_uavs = self.cfg.getint('options', 'num_uavs', fallback=1)
         if self.dynamics == 'SimpleFixedwing':
             action_plot_gb = self.create_actionPlot_groupBox_fixed_wing()
         else:
@@ -99,6 +100,59 @@ class TrainingUi(QWidget):
         list[:-1] = list[1:]
         list[-1] = float(value)
         return list
+
+
+    def _normalize_multi_uav_data(self, data, feature_dim):
+        """Convert signal payload into shape (num_uavs, feature_dim) when possible."""
+        arr_raw = np.asarray(data)
+
+        if arr_raw.dtype == object:
+            try:
+                arr_raw = np.asarray([np.asarray(x, dtype=np.float32) for x in arr_raw], dtype=np.float32)
+            except Exception:
+                pass
+
+        arr = np.asarray(arr_raw, dtype=np.float32)
+
+        if arr.ndim == 1:
+            if self.num_uavs > 1 and arr.size == self.num_uavs * feature_dim:
+                return arr.reshape(self.num_uavs, feature_dim)
+            if arr.size == feature_dim:
+                return arr.reshape(1, feature_dim)
+            return arr
+
+        if arr.ndim == 2:
+            if arr.shape == (self.num_uavs, feature_dim):
+                return arr
+            if arr.shape == (feature_dim, self.num_uavs):
+                return arr.T
+            if arr.shape[0] == 1 and arr.shape[1] == self.num_uavs * feature_dim:
+                return arr.reshape(self.num_uavs, feature_dim)
+
+        return arr
+
+    def _normalize_pose_array(self, pose):
+        arr = np.asarray(pose, dtype=np.float32)
+        if arr.ndim == 1 and arr.size >= 3:
+            return arr[:3].reshape(1, 3)
+        if arr.ndim == 2 and arr.shape[1] >= 3:
+            return arr[:, :3]
+        return arr
+
+    def _normalize_traj_array(self, traj, num_uavs):
+        arr_raw = np.asarray(traj)
+        if arr_raw.dtype == object:
+            try:
+                arr_raw = np.asarray([np.asarray(step, dtype=np.float32) for step in arr_raw], dtype=np.float32)
+            except Exception:
+                return None
+        arr = np.asarray(arr_raw, dtype=np.float32)
+
+        if arr.ndim == 3 and arr.shape[1] == num_uavs and arr.shape[2] >= 2:
+            return arr
+        if arr.ndim == 2 and num_uavs == 1 and arr.shape[1] >= 2:
+            return arr.reshape(arr.shape[0], 1, arr.shape[1])
+        return None
 
 # action plot groupbox
     def create_actionPlot_groupBox_multirotor(self):
@@ -214,7 +268,7 @@ class TrainingUi(QWidget):
             self.action_cb_multirotor(step, action)
 
     def action_cb_multirotor(self, step, action):
-        action_arr = np.asarray(action)
+        action_arr = self._normalize_multi_uav_data(action, 3)
         if action_arr.ndim == 1:
             uav1 = action_arr
             uav2 = None
@@ -282,7 +336,7 @@ class TrainingUi(QWidget):
         return state_plot_groupbox
 
     def state_cb(self, step, state_raw):
-        state_arr = np.asarray(state_raw)
+        state_arr = self._normalize_multi_uav_data(state_raw, 6)
         if state_arr.ndim == 1:
             uav1 = state_arr
             uav2 = None
@@ -368,7 +422,7 @@ class TrainingUi(QWidget):
     def attitude_plot_cb(self, step, attitude, attitude_cmd):
         """ plot attitude (pitch, roll, yaw) and the cmd data
         """
-        attitude_arr = np.asarray(attitude)
+        attitude_arr = self._normalize_multi_uav_data(attitude, 3)
         if attitude_arr.ndim == 1:
             uav1 = attitude_arr
             uav2 = None
@@ -547,51 +601,51 @@ class TrainingUi(QWidget):
         return traj_plot_groupbox
 
     def traj_plot_cb(self, goal, start, current_pose, trajectory_list):
-        """
-        Plot trajectory
-        """
-        # clear plot
+        """Plot trajectory."""
         self.traj_pw.clear()
 
-        # set background image
         background_list = ['SimpleAvoid', 'NH_center',
                            'City_400', 'Tree_200', 'Forest']
         if self.cfg.get('options', 'env_name') in background_list:
             self.traj_pw.addItem(self.background_img)
 
-        # single-uav: (3,), multi-uav: (N,3)
-        if np.asarray(start).ndim == 1:
-            # plot start, goal and trajectory
-            self.traj_pw.plot([start[0]], [start[1]], symbol='o')
-            self.traj_pw.plot([goal[0]], [goal[1]], symbol='o')
-            self.traj_pw.plot(
-                trajectory_list[..., 0], trajectory_list[..., 1], pen=self.pen_red)
+        start_arr = self._normalize_pose_array(start)
+        goal_arr = self._normalize_pose_array(goal)
+        current_arr = self._normalize_pose_array(current_pose)
+
+        if start_arr.ndim == 2 and start_arr.shape[0] == 1:
+            self.traj_pw.plot([start_arr[0, 0]], [start_arr[0, 1]], symbol='o')
+            self.traj_pw.plot([goal_arr[0, 0]], [goal_arr[0, 1]], symbol='o')
+            traj_single = np.asarray(trajectory_list)
+            if traj_single.ndim >= 2:
+                self.traj_pw.plot(traj_single[..., 0], traj_single[..., 1], pen=self.pen_red)
             return
 
-        # Multi-UAV visualization
-        traj_arr = np.asarray(trajectory_list)
+        num_uavs_plot = start_arr.shape[0] if start_arr.ndim == 2 else self.num_uavs
+        traj_arr = self._normalize_traj_array(trajectory_list, num_uavs_plot)
+
         pen_list = [
-            pg.mkPen(color=(220, 20, 60), width=2),    # crimson
-            pg.mkPen(color=(255, 215, 0), width=2),    # gold
-            pg.mkPen(color=(0, 128, 255), width=2),    # blue
-            pg.mkPen(color=(50, 205, 50), width=2),    # lime green
+            pg.mkPen(color=(220, 20, 60), width=2),
+            pg.mkPen(color=(255, 215, 0), width=2),
+            pg.mkPen(color=(0, 128, 255), width=2),
+            pg.mkPen(color=(50, 205, 50), width=2),
         ]
         symbol_list = ['o', 't', 's', 'd']
 
-        for i in range(start.shape[0]):
+        for i in range(num_uavs_plot):
             pen = pen_list[i % len(pen_list)]
             symbol = symbol_list[i % len(symbol_list)]
-            # If trajectories overlap exactly (e.g. same mapped vehicle), add a tiny
-            # visual-only offset so users can still see each UAV trace separately.
             vis_dx = 0.35 * i
             vis_dy = -0.35 * i
 
-            self.traj_pw.plot([start[i, 0] + vis_dx], [start[i, 1] + vis_dy], symbol=symbol, symbolSize=10, symbolBrush=pen.color())
-            self.traj_pw.plot([goal[i, 0] + vis_dx], [goal[i, 1] + vis_dy], symbol=symbol, symbolSize=10, symbolBrush=pen.color())
-            if np.asarray(current_pose).ndim == 2 and current_pose.shape[0] > i:
-                self.traj_pw.plot([current_pose[i, 0] + vis_dx], [current_pose[i, 1] + vis_dy], symbol=symbol, symbolSize=8, symbolBrush=pen.color())
+            if start_arr.ndim == 2 and start_arr.shape[0] > i:
+                self.traj_pw.plot([start_arr[i, 0] + vis_dx], [start_arr[i, 1] + vis_dy], symbol=symbol, symbolSize=10, symbolBrush=pen.color())
+            if goal_arr.ndim == 2 and goal_arr.shape[0] > i:
+                self.traj_pw.plot([goal_arr[i, 0] + vis_dx], [goal_arr[i, 1] + vis_dy], symbol=symbol, symbolSize=10, symbolBrush=pen.color())
+            if current_arr.ndim == 2 and current_arr.shape[0] > i:
+                self.traj_pw.plot([current_arr[i, 0] + vis_dx], [current_arr[i, 1] + vis_dy], symbol=symbol, symbolSize=8, symbolBrush=pen.color())
 
-            if traj_arr.ndim == 3 and traj_arr.shape[1] > i:
+            if traj_arr is not None and traj_arr.shape[1] > i:
                 self.traj_pw.plot(traj_arr[:, i, 0] + vis_dx, traj_arr[:, i, 1] + vis_dy, pen=pen)
 
 
