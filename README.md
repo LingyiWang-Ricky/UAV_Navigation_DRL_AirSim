@@ -189,6 +189,14 @@ Notes:
 - Each UAV has independent observations and executes its own action each step.
 - The environment exposes a concatenated action/observation interface for SB3 compatibility.
 
+Quick diagnostic before training:
+
+```bash
+python tools/test/airsim_multi_uav_check.py --vehicles Drone1 Drone2
+```
+
+If this check fails, fix AirSim `settings.json` vehicles and simulator startup first.
+
 ## GUI for training and evaluation
 
 ![img](resources/figures/gui_for_train_and_eval.png)
