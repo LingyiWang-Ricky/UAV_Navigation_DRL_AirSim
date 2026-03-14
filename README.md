@@ -163,6 +163,32 @@ Now we provide 3 training envrionment and 3 dynamics.
 * Multirotor
 * SimpleFixedwing
 
+## Two-UAV cooperative setup (independent observations and actions)
+
+This project now supports controlling two multirotors in one environment step.
+
+1. In config (e.g. `configs/config_Maze_SimpleMultirotor_2D.ini`), set:
+
+   ```ini
+   num_uavs = 2
+   uav_names = Drone1,Drone2
+   ```
+
+2. In AirSim settings (e.g. `airsim_settings/settings_multirotor.json`), define both vehicles under `Vehicles`:
+
+   ```json
+   "Vehicles": {
+     "Drone1": {"VehicleType": "SimpleFlight", "X": 0, "Y": 0, "Z": 0},
+     "Drone2": {"VehicleType": "SimpleFlight", "X": 2, "Y": 0, "Z": 0}
+   }
+   ```
+
+3. Keep `dynamic_name = Multirotor` (or `SimpleMultirotor`) and train as usual.
+
+Notes:
+- Each UAV has independent observations and executes its own action each step.
+- The environment exposes a concatenated action/observation interface for SB3 compatibility.
+
 ## GUI for training and evaluation
 
 ![img](resources/figures/gui_for_train_and_eval.png)
