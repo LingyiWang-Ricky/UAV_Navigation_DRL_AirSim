@@ -1141,10 +1141,17 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
     def set_pyqt_signal_multirotor(self, action, reward):
         step = int(self.total_step)
+        action = np.asarray(action)
+
+        if self.num_uavs > 1:
+            action_dim = self.dynamic_models[0].action_space.shape[0]
+            action = action[0:action_dim]
+
+        dynamic_model_plot = self.dynamic_models[0]
 
         # transfer 2D state and action to 3D
-        state = self.dynamic_model.state_raw
-        if self.dynamic_model.navigation_3d:
+        state = dynamic_model_plot.state_raw
+        if dynamic_model_plot.navigation_3d:
             action_output = action
             state_output = state
         else:
@@ -1155,11 +1162,19 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.state_signal.emit(step, state_output)
 
         # other values
-        self.attitude_signal.emit(step, np.asarray(self.dynamic_model.get_attitude(
-        )), np.asarray(self.dynamic_model.get_attitude_cmd()))
+        self.attitude_signal.emit(step, np.asarray(dynamic_model_plot.get_attitude(
+        )), np.asarray(dynamic_model_plot.get_attitude_cmd()))
         self.reward_signal.emit(step, reward, self.cumulated_episode_reward)
-        self.pose_signal.emit(np.asarray(self.dynamic_model.goal_position), np.asarray(
-            self.dynamic_model.start_position), np.asarray(self.dynamic_model.get_position()), np.asarray(self.trajectory_list))
+
+        if self.num_uavs > 1:
+            traj_plot = np.asarray([pose_list[0] for pose_list in self.trajectory_list], dtype=np.float32)
+            current_pose = np.asarray(dynamic_model_plot.get_position())
+        else:
+            traj_plot = np.asarray(self.trajectory_list)
+            current_pose = np.asarray(self.dynamic_model.get_position())
+
+        self.pose_signal.emit(np.asarray(dynamic_model_plot.goal_position), np.asarray(
+            dynamic_model_plot.start_position), current_pose, traj_plot)
 
     def visual_log_q_value(self, q_value, action, reward):
         '''

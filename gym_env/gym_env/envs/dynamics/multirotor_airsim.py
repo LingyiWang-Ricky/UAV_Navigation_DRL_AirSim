@@ -72,8 +72,9 @@ class MultirotorDynamicsAirsim():
                                            high=np.array([self.v_xy_max, self.yaw_rate_max_rad]),
                                            dtype=np.float32)
 
-    def reset(self):
-        self.client.reset()
+    def reset(self, do_client_reset=True):
+        if do_client_reset:
+            self.client.reset()
         # reset goal
         self.update_goal_pose()
 
