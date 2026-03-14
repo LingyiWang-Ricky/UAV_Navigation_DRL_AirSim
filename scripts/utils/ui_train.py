@@ -570,6 +570,21 @@ class TrainingUi(QWidget):
 
         # Multi-UAV visualization
         traj_arr = np.asarray(trajectory_list)
+        pen_list = [
+            pg.mkPen(color=(220, 20, 60), width=2),    # crimson
+            pg.mkPen(color=(255, 215, 0), width=2),    # gold
+            pg.mkPen(color=(0, 128, 255), width=2),    # blue
+            pg.mkPen(color=(50, 205, 50), width=2),    # lime green
+        ]
+        symbol_list = ['o', 't', 's', 'd']
+
+        for i in range(start.shape[0]):
+            pen = pen_list[i % len(pen_list)]
+            symbol = symbol_list[i % len(symbol_list)]
+            self.traj_pw.plot([start[i, 0]], [start[i, 1]], symbol=symbol, symbolSize=10, symbolBrush=pen.color())
+            self.traj_pw.plot([goal[i, 0]], [goal[i, 1]], symbol=symbol, symbolSize=10, symbolBrush=pen.color())
+            if np.asarray(current_pose).ndim == 2 and current_pose.shape[0] > i:
+                self.traj_pw.plot([current_pose[i, 0]], [current_pose[i, 1]], symbol=symbol, symbolSize=8, symbolBrush=pen.color())
         pen_list = [self.pen_red, self.pen_blue, self.pen_green, self.pen_yellow]
 
         for i in range(start.shape[0]):

@@ -47,6 +47,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.generate_q_map = cfg.getboolean('options', 'generate_q_map')
         self.perception_type = cfg.get('options', 'perception')
         self.num_uavs = cfg.getint('options', 'num_uavs', fallback=1)
+        self.uav_start_separation = cfg.getfloat('options', 'uav_start_separation', fallback=10.0)
         uav_names_raw = cfg.get('options', 'uav_names', fallback='Drone1,Drone2')
         self.uav_names = [name.strip() for name in uav_names_raw.split(',') if name.strip()]
         if len(self.uav_names) < self.num_uavs:
@@ -172,6 +173,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if self.num_uavs > 1:
             for i, dynamic_model in enumerate(self.dynamic_models[1:], start=1):
                 start_position = list(self.dynamic_model.start_position)
+                start_position[1] += i * self.uav_start_separation
                 start_position[1] += i * 2.0
                 dynamic_model.start_position = start_position
                 dynamic_model.start_random_angle = self.dynamic_model.start_random_angle
@@ -266,11 +268,18 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             action = np.asarray(action)
             action_dim = self.dynamic_models[0].action_space.shape[0]
             position_ue4 = []
+            action_split_list = []
+            for i, dynamic_model in enumerate(self.dynamic_models):
+                action_i = action[i*action_dim:(i+1)*action_dim]
+                action_split_list.append(action_i)
             for i, dynamic_model in enumerate(self.dynamic_models):
                 action_i = action[i*action_dim:(i+1)*action_dim]
                 dynamic_model.set_action(action_i)
                 position_ue4.append(dynamic_model.get_position())
             self.trajectory_list.append(position_ue4)
+
+            if self.step_num % 50 == 0:
+                print(f"multi-uav step {self.step_num} action={np.array(action_split_list)} pos={np.array(position_ue4)}")
 
         if self.num_uavs == 1:
             position_ue4 = self.dynamic_model.get_position()
