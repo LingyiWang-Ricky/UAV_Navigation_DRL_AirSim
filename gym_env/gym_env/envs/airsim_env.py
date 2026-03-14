@@ -279,6 +279,11 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self.trajectory_list.append(position_ue4)
             self.last_action_split_list = action_split_list
             self.last_position_list = position_ue4
+            for i, dynamic_model in enumerate(self.dynamic_models):
+                action_i = action[i*action_dim:(i+1)*action_dim]
+                dynamic_model.set_action(action_i)
+                position_ue4.append(dynamic_model.get_position())
+            self.trajectory_list.append(position_ue4)
 
             if self.step_num % 50 == 0:
                 print(f"multi-uav step {self.step_num} action={np.array(action_split_list)} pos={np.array(position_ue4)}")
