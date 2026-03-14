@@ -18,7 +18,7 @@ class MultirotorDynamicsSimple():
         v_xy, v_z, yaw_rate
     '''
 
-    def __init__(self, cfg) -> None:
+    def __init__(self, cfg, vehicle_name="") -> None:
 
         # config
         self.navigation_3d = cfg.getboolean('options', 'navigation_3d')
@@ -29,6 +29,7 @@ class MultirotorDynamicsSimple():
         # AirSim Client
         self.client = airsim.VehicleClient()
         self.client.confirmConnection()
+        self.vehicle_name = vehicle_name
 
         # start and goal position
         self.start_position = [0, 0, 0]
@@ -86,13 +87,13 @@ class MultirotorDynamicsSimple():
         self.yaw_rate = 0
 
         # reset pose
-        pose = self.client.simGetVehiclePose()
+        pose = self.client.simGetVehiclePose(vehicle_name=self.vehicle_name)
         pose.position.x_val = self.x
         pose.position.y_val = self.y
         pose.position.z_val = -self.z
         pose.orientation = airsim.to_quaternion(0, 0, self.yaw)
 
-        self.client.simSetVehiclePose(pose, False)
+        self.client.simSetVehiclePose(pose, False, vehicle_name=self.vehicle_name)
 
     def set_action(self, action):
         # ------------update control command---------------
@@ -116,12 +117,12 @@ class MultirotorDynamicsSimple():
             self.yaw += math.pi * 2
 
         # ------------update AirSim-------------------------
-        pose = self.client.simGetVehiclePose()
+        pose = self.client.simGetVehiclePose(vehicle_name=self.vehicle_name)
         pose.position.x_val = self.x
         pose.position.y_val = self.y
         pose.position.z_val = - self.z
         pose.orientation = airsim.to_quaternion(0, 0, self.yaw)
-        self.client.simSetVehiclePose(pose, False)
+        self.client.simSetVehiclePose(pose, False, vehicle_name=self.vehicle_name)
 
         return 0
 
@@ -253,7 +254,7 @@ class MultirotorDynamicsSimple():
         return yaw_error
 
     def get_position(self):
-        position = self.client.simGetVehiclePose().position
+        position = self.client.simGetVehiclePose(vehicle_name=self.vehicle_name).position
         return [position.x_val, position.y_val, -position.z_val]
 
     def get_attitude_cmd(self):
