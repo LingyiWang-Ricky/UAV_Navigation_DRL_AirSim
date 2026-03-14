@@ -8,6 +8,8 @@ import torch as th
 import numpy as np
 import math
 import cv2
+import json
+from pathlib import Path
 
 from .dynamics.multirotor_simple import MultirotorDynamicsSimple
 from .dynamics.multirotor_airsim import MultirotorDynamicsAirsim
@@ -243,43 +245,70 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
 
     def _resolve_uav_names_with_airsim(self):
-        """Validate configured UAV names against AirSim and auto-remap when needed."""
+        """Validate configured UAV names and auto-remap using AirSim/settings candidates."""
         if self.num_uavs <= 1 or self.dynamic_name not in ['Multirotor', 'SimpleMultirotor']:
             return
 
+        configured_names = self.uav_names[:self.num_uavs]
+        candidates = []
+
+        # 1) Query live AirSim vehicles (best source).
         try:
             probe_client = airsim.MultirotorClient()
             probe_client.confirmConnection()
-
             if hasattr(probe_client, 'listVehicles'):
-                available_vehicles = list(probe_client.listVehicles())
+                candidates = list(probe_client.listVehicles())
             elif hasattr(probe_client, 'simListVehicles'):
-                available_vehicles = list(probe_client.simListVehicles())
-            else:
-                available_vehicles = []
-
-            if not available_vehicles:
-                print('[Warning] AirSim did not return vehicle list. Keep config uav_names as-is.')
-                return
-
-            configured_names = self.uav_names[:self.num_uavs]
-            missing_names = [name for name in configured_names if name not in available_vehicles]
-            print(f"AirSim vehicles: {available_vehicles}, configured: {configured_names}")
-
-            if missing_names:
-                print(f"[Warning] Configured UAV names not found in AirSim: {missing_names}.")
-                if len(available_vehicles) >= self.num_uavs:
-                    self.uav_names = available_vehicles[:self.num_uavs]
-                    print(f"[Fix] Auto-remap uav_names to AirSim order: {self.uav_names}")
-                else:
-                    print(f"[Warning] AirSim only has {len(available_vehicles)} vehicles (< num_uavs={self.num_uavs}).")
-            elif len(available_vehicles) < self.num_uavs:
-                print(f"[Warning] AirSim only has {len(available_vehicles)} vehicles (< num_uavs={self.num_uavs}).")
-            else:
-                print('[Info] Configured uav_names validated in AirSim.')
-
+                candidates = list(probe_client.simListVehicles())
         except Exception as e:
-            print(f"[Warning] Failed to validate uav_names with AirSim: {e}")
+            print(f"[Warning] Failed to query AirSim vehicle list: {e}")
+
+        # 2) Fallback to known settings json files if AirSim API does not provide vehicle list.
+        if not candidates:
+            settings_candidates = [
+                Path('airsim_settings/settings_multirotor.json'),
+                Path.home() / 'Documents' / 'AirSim' / 'settings.json',
+            ]
+            for sp in settings_candidates:
+                try:
+                    if not sp.exists():
+                        continue
+                    data = json.loads(sp.read_text(encoding='utf-8'))
+                    vehicles = data.get('Vehicles', {})
+                    if isinstance(vehicles, dict):
+                        keys = [k for k in vehicles.keys() if isinstance(k, str) and k.strip()]
+                        if keys:
+                            candidates = keys
+                            print(f"[Info] Loaded UAV names from settings: {sp}")
+                            break
+                except Exception as e:
+                    print(f"[Warning] Failed to parse settings file {sp}: {e}")
+
+        if not candidates:
+            print('[Warning] Could not discover UAV names from AirSim or settings. Keep config uav_names as-is.')
+            return
+
+        # keep order + uniqueness
+        ordered_candidates = []
+        for name in candidates:
+            if name not in ordered_candidates:
+                ordered_candidates.append(name)
+        candidates = ordered_candidates
+
+        missing_names = [name for name in configured_names if name not in candidates]
+        print(f"UAV name discovery -> candidates={candidates}, configured={configured_names}")
+
+        if missing_names:
+            print(f"[Warning] Configured UAV names not found in discovered names: {missing_names}.")
+            if len(candidates) >= self.num_uavs:
+                self.uav_names = candidates[:self.num_uavs]
+                print(f"[Fix] Auto-remap uav_names to discovered order: {self.uav_names}")
+            else:
+                print(f"[Warning] Discovered UAV count {len(candidates)} < num_uavs={self.num_uavs}.")
+        elif len(candidates) < self.num_uavs:
+            print(f"[Warning] Discovered UAV count {len(candidates)} < num_uavs={self.num_uavs}.")
+        else:
+            print('[Info] Configured uav_names validated with discovered UAV names.')
 
     def reset(self):
         # reset state
@@ -307,7 +336,23 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         obs = self.get_obs()
 
+        if self.num_uavs > 1:
+            self._check_multi_uav_binding()
+
         return obs
+
+    def _check_multi_uav_binding(self):
+        if self.num_uavs <= 1:
+            return
+        try:
+            pos_list = [np.asarray(model.get_position(), dtype=np.float32) for model in self.dynamic_models]
+            print('[BindingCheck] positions after reset:', pos_list)
+            if len(pos_list) >= 2:
+                all_same = all(np.allclose(pos_list[0], p, atol=1e-2) for p in pos_list[1:])
+                if all_same:
+                    print('[Warning] All UAV positions are identical right after reset. This usually means vehicle_name binding is incorrect.')
+        except Exception as e:
+            print(f"[Warning] _check_multi_uav_binding failed: {e}")
 
     def step(self, action):
         # set action
