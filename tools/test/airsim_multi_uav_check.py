@@ -6,6 +6,7 @@ Usage:
 
 import argparse
 import sys
+import socket
 import airsim
 
 
@@ -85,14 +86,36 @@ def main() -> int:
         default=["Drone1", "Drone2"],
         help="Vehicle names to check (default: Drone1 Drone2)",
     )
+    parser.add_argument("--host", default="127.0.0.1", help="AirSim RPC host")
+    parser.add_argument("--port", type=int, default=41451, help="AirSim RPC port")
+    parser.add_argument(
+        "--connect-timeout",
+        type=float,
+        default=3.0,
+        help="Socket timeout (seconds) before failing fast",
+    )
     args = parser.parse_args()
 
-    print("Connecting to AirSim...")
-    client = airsim.MultirotorClient()
+    print(
+        f"Connecting to AirSim RPC {args.host}:{args.port} "
+        f"(timeout={args.connect_timeout:.1f}s)..."
+    )
+
+    # Fast-fail check to avoid confirmConnection hanging indefinitely.
+    try:
+        with socket.create_connection((args.host, args.port), timeout=args.connect_timeout):
+            pass
+    except OSError as exc:
+        print(f"Connection failed before AirSim handshake: {exc}")
+        print("Hint: start UE/AirSim scene first and verify RPC is enabled.")
+        return 2
+
+    client = airsim.MultirotorClient(ip=args.host, port=args.port, timeout_value=args.connect_timeout)
     try:
         client.confirmConnection()
     except Exception as exc:  # noqa: BLE001
         print(f"Connection failed: {exc}")
+        print("Hint: check SimMode=Multirotor and whether RPC server is listening.")
         return 2
 
     all_ok = True
