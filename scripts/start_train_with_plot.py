@@ -1,5 +1,6 @@
 import sys
 import argparse
+import os
 
 from PyQt5 import QtWidgets
 
@@ -25,6 +26,7 @@ def main():
     # config_file = 'configs/config_SimpleAvoid_SimpleMultirotor.ini'
     # config_file = 'configs/config_fixedwing.ini'
     config_file = 'configs/config_Maze_SimpleMultirotor_2D.ini'
+    print('Using config file:', os.path.abspath(config_file))
 
     # 1. Create the qt thread
     app = QtWidgets.QApplication(sys.argv)
@@ -42,6 +44,8 @@ def main():
 
     cfg = ConfigParser()
     cfg.read(config_file)
+    print('Config check -> num_uavs:', cfg.get('options', 'num_uavs', fallback='(missing, fallback=1)'),
+          'uav_names:', cfg.get('options', 'uav_names', fallback='(missing)'))
 
     training_thread.start()
 
