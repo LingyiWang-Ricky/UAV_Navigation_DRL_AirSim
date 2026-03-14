@@ -231,8 +231,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
     def reset(self):
         # reset state
-        for dynamic_model in self.dynamic_models:
-            dynamic_model.reset()
+        if self.dynamic_name == 'Multirotor':
+            # reset AirSim world only once to avoid repeated global resets when using multiple UAVs
+            self.client.reset()
+            for dynamic_model in self.dynamic_models:
+                dynamic_model.reset(do_client_reset=False)
+        else:
+            for dynamic_model in self.dynamic_models:
+                dynamic_model.reset()
 
         self.episode_num += 1
         self.step_num = 0
@@ -1047,7 +1053,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         for i in model_indices:
             dynamic_model = self.dynamic_models[i]
-            collision_info = dynamic_model.client.simGetCollisionInfo(vehicle_name=getattr(dynamic_model, 'vehicle_name', ''))
+            try:
+                collision_info = dynamic_model.client.simGetCollisionInfo(vehicle_name=getattr(dynamic_model, 'vehicle_name', ''))
+            except TypeError:
+                collision_info = dynamic_model.client.simGetCollisionInfo()
             min_distance = self.min_distance_to_obstacles if self.num_uavs == 1 else self.min_distance_to_obstacles_all[i]
             if collision_info.has_collided or min_distance < self.crash_distance:
                 is_crashed = True
