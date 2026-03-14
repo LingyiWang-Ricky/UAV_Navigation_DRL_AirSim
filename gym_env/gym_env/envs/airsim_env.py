@@ -53,6 +53,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if len(self.uav_names) < self.num_uavs:
             self.uav_names += [f"Drone{i+1}" for i in range(len(self.uav_names), self.num_uavs)]
         self._active_uav_idx = None
+        self._resolve_uav_names_with_airsim()
         print(f"UAV setup -> num_uavs={self.num_uavs}, uav_names={self.uav_names[:self.num_uavs]}, start_separation={self.uav_start_separation}")
 
         # create LGMD agent
@@ -83,6 +84,11 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         else:
             raise Exception("Invalid dynamic_name!", self.dynamic_name)
         self.dynamic_model = self.dynamic_models[0]
+
+        if self.num_uavs > 1 and self.dynamic_name in ['Multirotor', 'SimpleMultirotor']:
+            for i, model in enumerate(self.dynamic_models):
+                model_name = getattr(model, 'vehicle_name', f'UAV-{i+1}')
+                print(f"[UAV Mapping] idx={i} -> vehicle_name='{model_name}'")
 
         # set start and goal position according to different environment
         if self.env_name == 'NH_center':
@@ -234,6 +240,46 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             print('Reward type: ', self.reward_type)
         except NoOptionError:
             self.reward_type = None
+
+
+    def _resolve_uav_names_with_airsim(self):
+        """Validate configured UAV names against AirSim and auto-remap when needed."""
+        if self.num_uavs <= 1 or self.dynamic_name not in ['Multirotor', 'SimpleMultirotor']:
+            return
+
+        try:
+            probe_client = airsim.MultirotorClient()
+            probe_client.confirmConnection()
+
+            if hasattr(probe_client, 'listVehicles'):
+                available_vehicles = list(probe_client.listVehicles())
+            elif hasattr(probe_client, 'simListVehicles'):
+                available_vehicles = list(probe_client.simListVehicles())
+            else:
+                available_vehicles = []
+
+            if not available_vehicles:
+                print('[Warning] AirSim did not return vehicle list. Keep config uav_names as-is.')
+                return
+
+            configured_names = self.uav_names[:self.num_uavs]
+            missing_names = [name for name in configured_names if name not in available_vehicles]
+            print(f"AirSim vehicles: {available_vehicles}, configured: {configured_names}")
+
+            if missing_names:
+                print(f"[Warning] Configured UAV names not found in AirSim: {missing_names}.")
+                if len(available_vehicles) >= self.num_uavs:
+                    self.uav_names = available_vehicles[:self.num_uavs]
+                    print(f"[Fix] Auto-remap uav_names to AirSim order: {self.uav_names}")
+                else:
+                    print(f"[Warning] AirSim only has {len(available_vehicles)} vehicles (< num_uavs={self.num_uavs}).")
+            elif len(available_vehicles) < self.num_uavs:
+                print(f"[Warning] AirSim only has {len(available_vehicles)} vehicles (< num_uavs={self.num_uavs}).")
+            else:
+                print('[Info] Configured uav_names validated in AirSim.')
+
+        except Exception as e:
+            print(f"[Warning] Failed to validate uav_names with AirSim: {e}")
 
     def reset(self):
         # reset state
@@ -685,6 +731,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             reward_list.append(reward_i)
 
         self._active_uav_idx = None
+        self._resolve_uav_names_with_airsim()
         return float(np.mean(reward_list))
 # ! ---------------------calculate rewards-------------------------------------
 
@@ -1117,6 +1164,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 in_desired_pose = False
                 break
         self._active_uav_idx = None
+        self._resolve_uav_names_with_airsim()
 
         return in_desired_pose
 
