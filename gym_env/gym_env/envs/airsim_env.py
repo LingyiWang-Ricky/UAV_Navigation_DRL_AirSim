@@ -53,6 +53,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if len(self.uav_names) < self.num_uavs:
             self.uav_names += [f"Drone{i+1}" for i in range(len(self.uav_names), self.num_uavs)]
         self._active_uav_idx = None
+        print(f"UAV setup -> num_uavs={self.num_uavs}, uav_names={self.uav_names[:self.num_uavs]}, start_separation={self.uav_start_separation}")
 
         # create LGMD agent
         if self.perception_type == 'lgmd':
@@ -174,7 +175,6 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             for i, dynamic_model in enumerate(self.dynamic_models[1:], start=1):
                 start_position = list(self.dynamic_model.start_position)
                 start_position[1] += i * self.uav_start_separation
-                start_position[1] += i * 2.0
                 dynamic_model.start_position = start_position
                 dynamic_model.start_random_angle = self.dynamic_model.start_random_angle
                 dynamic_model.goal_position = list(self.dynamic_model.goal_position)
@@ -252,6 +252,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.previous_distance_from_des_point = float(np.mean(self.goal_distance_list))
 
         self.trajectory_list = []
+        self.last_action_split_list = None
+        self.last_position_list = None
 
         obs = self.get_obs()
 
@@ -272,6 +274,11 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             for i, dynamic_model in enumerate(self.dynamic_models):
                 action_i = action[i*action_dim:(i+1)*action_dim]
                 action_split_list.append(action_i)
+                dynamic_model.set_action(action_i)
+                position_ue4.append(dynamic_model.get_position())
+            self.trajectory_list.append(position_ue4)
+            self.last_action_split_list = action_split_list
+            self.last_position_list = position_ue4
             for i, dynamic_model in enumerate(self.dynamic_models):
                 action_i = action[i*action_dim:(i+1)*action_dim]
                 dynamic_model.set_action(action_i)
@@ -294,6 +301,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             'is_not_in_workspace': self.is_not_inside_workspace(),
             'step_num': self.step_num
         }
+        if self.num_uavs > 1:
+            info['uav_action_position_map'] = self.get_uav_action_position_map(action_split_list, position_ue4)
         if done:
             print(info)
 
@@ -363,6 +372,26 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.total_step += 1
 
         return obs, reward, done, info
+
+    def get_uav_action_position_map(self, action_split_list=None, position_list=None):
+        if self.num_uavs <= 1:
+            return None
+
+        if action_split_list is None:
+            action_split_list = getattr(self, 'last_action_split_list', None)
+        if position_list is None:
+            position_list = getattr(self, 'last_position_list', None)
+        if action_split_list is None or position_list is None:
+            return None
+
+        mapping = {}
+        for i in range(min(len(action_split_list), len(position_list), self.num_uavs)):
+            uav_name = self.uav_names[i] if i < len(self.uav_names) else f"Drone{i+1}"
+            mapping[uav_name] = {
+                'action': np.asarray(action_split_list[i]).tolist(),
+                'position': np.asarray(position_list[i]).tolist()
+            }
+        return mapping
 
 # ! -------------------------get obs------------------------------------------
     def get_obs(self):
@@ -1122,6 +1151,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.client.simPrintLogMessage('reward: ', "{:4.4f} total: {:4.4f}".format(
             reward, self.cumulated_episode_reward))
         self.client.simPrintLogMessage('Info: ', str(info))
+        if self.num_uavs > 1:
+            action_position_map = info.get('uav_action_position_map', None)
+            if action_position_map is not None:
+                self.client.simPrintLogMessage('UAV Action-Pos: ', str(action_position_map))
         self.client.simPrintLogMessage(
             'Feature_norm: ', str(self.dynamic_model.state_norm))
         self.client.simPrintLogMessage(
@@ -1185,15 +1218,6 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             state_output = np.asarray(state_output_list)
             attitude_real = np.asarray(attitude_real_list)
             attitude_cmd = np.asarray(attitude_cmd_list)
-            action = action[0:action_dim]
-
-        dynamic_model_plot = self.dynamic_models[0]
-
-        # transfer 2D state and action to 3D
-        state = dynamic_model_plot.state_raw
-        if dynamic_model_plot.navigation_3d:
-            action_output = action
-            state_output = state
         else:
             dynamic_model_plot = self.dynamic_models[0]
             # transfer 2D state and action to 3D
@@ -1212,8 +1236,6 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         # other values
         self.attitude_signal.emit(step, attitude_real, attitude_cmd)
-        self.attitude_signal.emit(step, np.asarray(dynamic_model_plot.get_attitude(
-        )), np.asarray(dynamic_model_plot.get_attitude_cmd()))
         self.reward_signal.emit(step, reward, self.cumulated_episode_reward)
 
         if self.num_uavs > 1:
@@ -1228,14 +1250,6 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             start_pose = np.asarray(dynamic_model_plot.start_position)
 
         self.pose_signal.emit(goal_pose, start_pose, current_pose, traj_plot)
-            traj_plot = np.asarray([pose_list[0] for pose_list in self.trajectory_list], dtype=np.float32)
-            current_pose = np.asarray(dynamic_model_plot.get_position())
-        else:
-            traj_plot = np.asarray(self.trajectory_list)
-            current_pose = np.asarray(self.dynamic_model.get_position())
-
-        self.pose_signal.emit(np.asarray(dynamic_model_plot.goal_position), np.asarray(
-            dynamic_model_plot.start_position), current_pose, traj_plot)
 
     def visual_log_q_value(self, q_value, action, reward):
         '''

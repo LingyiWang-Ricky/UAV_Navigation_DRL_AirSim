@@ -177,10 +177,6 @@ def main() -> int:
 
     if last_exc is not None:
         print(f"Connection failed: {last_exc}")
-    try:
-        client.confirmConnection()
-    except Exception as exc:  # noqa: BLE001
-        print(f"Connection failed: {exc}")
         print("Hint: check SimMode=Multirotor and whether RPC server is listening.")
         common_ports = list(range(41451, 41461))
         open_ports = scan_open_ports(args.host, common_ports, timeout_s=0.2)
@@ -209,6 +205,28 @@ def main() -> int:
     for vehicle_name in args.vehicles:
         if not check_vehicle(client, vehicle_name):
             all_ok = False
+
+    # Additional sanity check: if all reported poses are nearly identical,
+    # AirSim may be ignoring vehicle_name and routing to the same vehicle.
+    pose_list = []
+    for vehicle_name in args.vehicles:
+        try:
+            pose = client.simGetVehiclePose(vehicle_name=vehicle_name)
+            pose_list.append((vehicle_name, pose.position.x_val, pose.position.y_val, pose.position.z_val))
+        except Exception:
+            pass
+
+    if len(pose_list) >= 2:
+        all_same = True
+        ref = pose_list[0][1:]
+        for _, x, y, z in pose_list[1:]:
+            if abs(x - ref[0]) > 1e-3 or abs(y - ref[1]) > 1e-3 or abs(z - ref[2]) > 1e-3:
+                all_same = False
+                break
+        if all_same:
+            print("\n[Warning] All queried vehicle poses are identical.")
+            print("This often means vehicle_name is not being mapped to distinct AirSim vehicles.")
+            print("Please verify Documents/AirSim/settings.json has multiple Vehicles entries and scene restarted.")
 
     if all_ok:
         print("\n[Result] PASS: all requested vehicles are healthy.")

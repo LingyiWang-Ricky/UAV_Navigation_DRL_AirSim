@@ -209,6 +209,10 @@ python tools/test/airsim_multi_uav_check.py --host 127.0.0.1 --port 41451 --conn
 
 If this check fails, fix AirSim `settings.json` vehicles and simulator startup first.
 
+If the checker passes but prints `All queried vehicle poses are identical`,
+AirSim is likely not mapping `vehicle_name` to distinct UAVs. Re-check your
+`Documents/AirSim/settings.json` `Vehicles` block and restart the UE scene.
+
 If you see `Connection failed: Request timed out`:
 
 - Wait for UE/AirSim scene to fully load, then run the checker again.

@@ -585,12 +585,6 @@ class TrainingUi(QWidget):
             self.traj_pw.plot([goal[i, 0]], [goal[i, 1]], symbol=symbol, symbolSize=10, symbolBrush=pen.color())
             if np.asarray(current_pose).ndim == 2 and current_pose.shape[0] > i:
                 self.traj_pw.plot([current_pose[i, 0]], [current_pose[i, 1]], symbol=symbol, symbolSize=8, symbolBrush=pen.color())
-        pen_list = [self.pen_red, self.pen_blue, self.pen_green, self.pen_yellow]
-
-        for i in range(start.shape[0]):
-            pen = pen_list[i % len(pen_list)]
-            self.traj_pw.plot([start[i, 0]], [start[i, 1]], symbol='o', symbolBrush=pen.color())
-            self.traj_pw.plot([goal[i, 0]], [goal[i, 1]], symbol='o', symbolBrush=pen.color())
 
             if traj_arr.ndim == 3 and traj_arr.shape[1] > i:
                 self.traj_pw.plot(traj_arr[:, i, 0], traj_arr[:, i, 1], pen=pen)
