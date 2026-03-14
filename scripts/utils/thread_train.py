@@ -51,18 +51,70 @@ class TrainingThread(QtCore.QThread):
         self.project_name = env_name
 
         # make gym environment
+        # NOTE:
+        # Keep __init__ lightweight for GUI responsiveness.
+        # AirSim connection/configuration happens in run() (worker thread),
+        # otherwise UI can freeze before app event loop starts.
         self.env = gym.make('airsim-env-v0')
-        self.env.set_config(self.cfg)
 
-        wandb_name = self.cfg.get(
-            'options', 'policy_name') + '-' + self.cfg.get('options', 'algo')
-        if self.cfg.get('options', 'dynamic_name') == 'SimpleFixedwing':
-            if self.cfg.get('options', 'perception') == "lgmd":
-                wandb_name += '-LGMD'
-            else:
-                wandb_name += '-depth'
-            if self.cfg.getfloat('fixedwing', 'pitch_flap_hz') != 0:
-                wandb_name += '-Flapping'
+    def terminate(self):
+        print('TrainingThread terminated')
+
+    def get_base_env(self):
+        """Unwrap wrappers to access the original AirsimGymEnv instance.
+
+        Handles common gym/gymnasium wrappers and vec-env style containers.
+        """
+        env = self.env
+        visited_ids = set()
+
+        while env is not None and id(env) not in visited_ids:
+            visited_ids.add(id(env))
+
+            # Fast path: we reached the target env implementation.
+            if hasattr(env, 'set_config') and hasattr(env, 'dynamic_model'):
+                return env
+
+            # Common wrapper styles
+            if hasattr(env, 'unwrapped') and env.unwrapped is not env:
+                env = env.unwrapped
+                continue
+            if hasattr(env, 'env'):
+                env = env.env
+                continue
+            if hasattr(env, 'venv'):
+                env = env.venv
+                continue
+            if hasattr(env, 'envs') and len(env.envs) > 0:
+                env = env.envs[0]
+                continue
+
+            break
+
+        return env
+
+    def run(self):
+        print("run training thread")
+        print('TrainingThread config -> num_uavs:', self.cfg.get('options', 'num_uavs', fallback='(missing, fallback=1)'),
+              'uav_names:', self.cfg.get('options', 'uav_names', fallback='(missing)'))
+
+        # Initialize env config in worker thread (may connect to AirSim)
+        base_env = self.get_base_env()
+        print(f"Env runtime type -> wrapped={type(self.env).__name__} base={type(base_env).__name__}")
+        if not hasattr(base_env, 'set_config'):
+            raise RuntimeError(
+                f"Cannot find set_config() on base env (type={type(base_env).__name__}). "
+                "Please check gym wrapper compatibility."
+            )
+        base_env.set_config(self.cfg)
+        cfg_num_uavs = self.cfg.getint('options', 'num_uavs', fallback=1)
+        env_num_uavs = getattr(base_env, 'num_uavs', 'N/A')
+        print(f"Env runtime check -> env.num_uavs={env_num_uavs} cfg.num_uavs={cfg_num_uavs}")
+        if env_num_uavs != cfg_num_uavs:
+            raise RuntimeError(
+                f"num_uavs mismatch: env has {env_num_uavs} "
+                f"but config has {cfg_num_uavs}. Please check loaded config file."
+            )
 
         # wandb
         if self.cfg.getboolean('options', 'use_wandb'):
@@ -73,12 +125,6 @@ class TrainingThread(QtCore.QThread):
                 sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
                 save_code=True,  # optional
             )
-
-    def terminate(self):
-        print('TrainingThread terminated')
-
-    def run(self):
-        print("run training thread")
 
         # ! -----------------------------------init folders-----------------------------------------
         now = datetime.datetime.now()
@@ -101,7 +147,7 @@ class TrainingThread(QtCore.QThread):
             self.cfg.write(configfile)
 
         #! -----------------------------------policy selection-------------------------------------
-        feature_num_state = self.env.dynamic_model.state_feature_length
+        feature_num_state = base_env.dynamic_model.state_feature_length
         feature_num_cnn = self.cfg.getint('options', 'cnn_feature_num')
         policy_name = self.cfg.get('options', 'policy_name')
 
@@ -209,8 +255,8 @@ class TrainingThread(QtCore.QThread):
         #! -------------------------------------train-----------------------------------------
         print('start training model')
         total_timesteps = self.cfg.getint('options', 'total_timesteps')
-        self.env.model = model
-        self.env.data_path = data_path
+        base_env.model = model
+        base_env.data_path = data_path
 
         if self.cfg.getboolean('options', 'use_wandb'):
             # if algo == 'TD3' or algo == 'SAC':
