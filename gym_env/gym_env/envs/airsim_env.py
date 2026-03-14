@@ -53,7 +53,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if len(self.uav_names) < self.num_uavs:
             self.uav_names += [f"Drone{i+1}" for i in range(len(self.uav_names), self.num_uavs)]
         self._active_uav_idx = None
-        print(f"UAV setup -> num_uavs={self.num_uavs}, uav_names={self.uav_names[:self.num_uavs]}, start_separation={self.uav_start_separation}")
+        print(f"UAV setup -> num_uavs={self.num_uavs}, uav_names={self.uav_names[:self.num_uavs]}, start_separation={self.uav_start_separation}", flush=True)
 
         # create LGMD agent
         if self.perception_type == 'lgmd':
@@ -285,7 +285,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self.last_position_list = position_ue4
 
             action_pos_map = self.get_uav_action_position_map(action_split_list, position_ue4)
-            print(f"multi-uav step {self.step_num} action_pos={action_pos_map}")
+            print(f"multi-uav step {self.step_num} action_pos={action_pos_map}", flush=True)
 
             # runtime warning for common misconfiguration: both names mapped to same vehicle
             if len(position_ue4) >= 2:
@@ -296,7 +296,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                         same_pose = False
                         break
                 if same_pose and self.step_num % 20 == 0:
-                    print("[Warning] Multi-UAV positions are identical at this step. Check AirSim vehicle_name mapping.")
+                    print("[Warning] Multi-UAV positions are identical at this step. Check AirSim vehicle_name mapping.", flush=True)
 
         if self.num_uavs == 1:
             position_ue4 = self.dynamic_model.get_position()
@@ -313,6 +313,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         }
         if self.num_uavs > 1:
             info['uav_action_position_map'] = self.get_uav_action_position_map(action_split_list, position_ue4)
+            info['num_uavs_runtime'] = self.num_uavs
         if done:
             print(info)
 

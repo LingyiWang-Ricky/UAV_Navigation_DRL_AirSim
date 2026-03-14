@@ -67,6 +67,13 @@ class TrainingThread(QtCore.QThread):
 
         # Initialize env config in worker thread (may connect to AirSim)
         self.env.set_config(self.cfg)
+        cfg_num_uavs = self.cfg.getint('options', 'num_uavs', fallback=1)
+        print(f"Env runtime check -> env.num_uavs={getattr(self.env, 'num_uavs', 'N/A')} cfg.num_uavs={cfg_num_uavs}")
+        if getattr(self.env, 'num_uavs', 1) != cfg_num_uavs:
+            raise RuntimeError(
+                f"num_uavs mismatch: env has {getattr(self.env, 'num_uavs', 'N/A')} "
+                f"but config has {cfg_num_uavs}. Please check loaded config file."
+            )
 
         # wandb
         if self.cfg.getboolean('options', 'use_wandb'):
