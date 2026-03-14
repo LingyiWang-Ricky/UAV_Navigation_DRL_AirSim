@@ -259,20 +259,26 @@ class TrainingUi(QWidget):
         self.distance_list = np.linspace(0, 0, self.max_len)
         self.vertical_dis_list = np.linspace(0, 0, self.max_len)
         self.relative_yaw_list = np.linspace(0, 0, self.max_len)
+        self.distance_list_uav2 = np.linspace(0, 0, self.max_len)
+        self.vertical_dis_list_uav2 = np.linspace(0, 0, self.max_len)
+        self.relative_yaw_list_uav2 = np.linspace(0, 0, self.max_len)
 
         layout = QVBoxLayout()
 
         self.pw1 = pg.PlotWidget(title='distance_xy (m)')
         self.pw1.showGrid(x=True, y=True)
         self.p1 = self.pw1.plot()
+        self.p1_uav2 = self.pw1.plot()
 
         self.pw2 = pg.PlotWidget(title='distance_z (m)')
         self.pw2.showGrid(x=True, y=True)
         self.p2 = self.pw2.plot()
+        self.p2_uav2 = self.pw2.plot()
 
         self.pw3 = pg.PlotWidget(title='relative yaw (deg)')
         self.pw3.showGrid(x=True, y=True)
         self.p3 = self.pw3.plot()
+        self.p3_uav2 = self.pw3.plot()
 
         layout.addWidget(self.pw1)
         layout.addWidget(self.pw2)
@@ -298,6 +304,14 @@ class TrainingUi(QWidget):
         self.p1.setData(self.distance_list, pen=self.pen_red)
         self.p2.setData(self.vertical_dis_list, pen=self.pen_red)
         self.p3.setData(self.relative_yaw_list, pen=self.pen_red)
+
+        if uav2 is not None:
+            self.update_value_list(self.distance_list_uav2, uav2[0])
+            self.update_value_list(self.vertical_dis_list_uav2, uav2[1])
+            self.update_value_list(self.relative_yaw_list_uav2, uav2[2])
+            self.p1_uav2.setData(self.distance_list_uav2, pen=self.pen_green)
+            self.p2_uav2.setData(self.vertical_dis_list_uav2, pen=self.pen_green)
+            self.p3_uav2.setData(self.relative_yaw_list_uav2, pen=self.pen_green)
 
         # update action real
         self.update_value_list(self.v_xy_real_list, uav1[3])

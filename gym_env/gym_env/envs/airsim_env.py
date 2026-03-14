@@ -314,6 +314,18 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if self.num_uavs > 1:
             info['uav_action_position_map'] = self.get_uav_action_position_map(action_split_list, position_ue4)
             info['num_uavs_runtime'] = self.num_uavs
+
+            if len(position_ue4) >= 2 and len(action_split_list) >= 2:
+                pos_1 = np.asarray(position_ue4[0], dtype=np.float32)
+                pos_2 = np.asarray(position_ue4[1], dtype=np.float32)
+                act_1 = np.asarray(action_split_list[0], dtype=np.float32)
+                act_2 = np.asarray(action_split_list[1], dtype=np.float32)
+                print(
+                    f"step={self.step_num} "
+                    f"{self.uav_names[0]} pos={np.round(pos_1, 2).tolist()} act={np.round(act_1, 3).tolist()} | "
+                    f"{self.uav_names[1]} pos={np.round(pos_2, 2).tolist()} act={np.round(act_2, 3).tolist()}",
+                    flush=True
+                )
         if done:
             print(info)
 
