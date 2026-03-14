@@ -7,6 +7,9 @@ Usage:
 import argparse
 import sys
 import socket
+import platform
+import subprocess
+import time
 import airsim
 
 
@@ -19,6 +22,31 @@ def scan_open_ports(host: str, ports, timeout_s: float):
         except OSError:
             continue
     return open_ports
+
+
+def get_port_owner_hint(host: str, port: int):
+    """Best-effort port owner hint.
+    Returns a short string or None.
+    """
+    try:
+        if platform.system().lower().startswith("win"):
+            out = subprocess.check_output(["netstat", "-ano"], text=True, stderr=subprocess.STDOUT)
+            for line in out.splitlines():
+                if f"{host}:{port}" in line or f":{port}" in line:
+                    line = line.strip()
+                    if "LISTENING" in line or "ESTABLISHED" in line:
+                        parts = line.split()
+                        if len(parts) >= 5:
+                            pid = parts[-1]
+                            return f"Port {port} appears in netstat (PID={pid})."
+        else:
+            out = subprocess.check_output(["ss", "-ltnp"], text=True, stderr=subprocess.STDOUT)
+            for line in out.splitlines():
+                if f":{port}" in line:
+                    return f"Port {port} listening entry: {line.strip()}"
+    except Exception:
+        return None
+    return None
 
 
 def check_vehicle(client, vehicle_name: str) -> bool:
@@ -105,6 +133,18 @@ def main() -> int:
         default=3.0,
         help="Socket timeout (seconds) before failing fast",
     )
+    parser.add_argument(
+        "--handshake-retries",
+        type=int,
+        default=5,
+        help="Number of confirmConnection retries before declaring failure",
+    )
+    parser.add_argument(
+        "--retry-interval",
+        type=float,
+        default=2.0,
+        help="Seconds to wait between handshake retries",
+    )
     args = parser.parse_args()
 
     print(
@@ -122,6 +162,21 @@ def main() -> int:
         return 2
 
     client = airsim.MultirotorClient(ip=args.host, port=args.port, timeout_value=args.connect_timeout)
+    last_exc = None
+    for i in range(args.handshake_retries):
+        try:
+            if i > 0:
+                print(f"Retrying AirSim handshake ({i+1}/{args.handshake_retries})...")
+            client.confirmConnection()
+            last_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if i < args.handshake_retries - 1:
+                time.sleep(args.retry_interval)
+
+    if last_exc is not None:
+        print(f"Connection failed: {last_exc}")
     try:
         client.confirmConnection()
     except Exception as exc:  # noqa: BLE001
@@ -142,6 +197,9 @@ def main() -> int:
                     "Usually this means the service on that port is not AirSim yet, "
                     "or UE scene has not fully loaded."
                 )
+                owner_hint = get_port_owner_hint(args.host, args.port)
+                if owner_hint:
+                    print(owner_hint)
         else:
             print("No common AirSim RPC ports are open on localhost.")
             print("Please start UE/AirSim scene first and wait until world fully loads.")

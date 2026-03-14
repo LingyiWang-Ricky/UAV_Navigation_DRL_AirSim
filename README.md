@@ -201,6 +201,12 @@ If your AirSim RPC is not on default host/port, use:
 python tools/test/airsim_multi_uav_check.py --host 127.0.0.1 --port 41451 --vehicles Drone1 Drone2
 ```
 
+For slow UE startup, increase retries:
+
+```bash
+python tools/test/airsim_multi_uav_check.py --host 127.0.0.1 --port 41451 --connect-timeout 3 --handshake-retries 10 --retry-interval 2 --vehicles Drone1 Drone2
+```
+
 If this check fails, fix AirSim `settings.json` vehicles and simulator startup first.
 
 If you see `Connection failed: Request timed out`:
