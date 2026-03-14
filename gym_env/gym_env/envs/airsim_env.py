@@ -271,13 +271,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         elif self.num_uavs == 1:
             self.dynamic_model.set_action(action)
         else:
-            action = np.asarray(action)
-            action_dim = self.dynamic_models[0].action_space.shape[0]
+            action, action_split_list = self._split_multi_uav_action(action)
             position_ue4 = []
-            action_split_list = []
             for i, dynamic_model in enumerate(self.dynamic_models):
-                action_i = action[i*action_dim:(i+1)*action_dim]
-                action_split_list.append(action_i)
+                action_i = action_split_list[i]
                 dynamic_model.set_action(action_i)
                 position_ue4.append(dynamic_model.get_position())
             self.trajectory_list.append(position_ue4)
@@ -382,6 +379,36 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.total_step += 1
 
         return obs, reward, done, info
+
+    def _split_multi_uav_action(self, action):
+        """Normalize multi-UAV action and split it per UAV.
+
+        Accept action in either flat shape ``(num_uavs * action_dim,)`` or
+        matrix shape ``(num_uavs, action_dim)``.
+        """
+        action_dim = self.dynamic_models[0].action_space.shape[0]
+        action_arr = np.asarray(action, dtype=np.float32)
+
+        if action_arr.ndim == 2:
+            if action_arr.shape == (self.num_uavs, action_dim):
+                action_arr = action_arr.reshape(-1)
+            elif action_arr.shape == (action_dim, self.num_uavs):
+                action_arr = action_arr.T.reshape(-1)
+            else:
+                raise ValueError(
+                    f"Invalid multi-uav action shape {action_arr.shape}, "
+                    f"expected ({self.num_uavs}, {action_dim}) or flat vector."
+                )
+        elif action_arr.ndim != 1:
+            raise ValueError(f"Invalid multi-uav action ndim {action_arr.ndim}, expected 1 or 2.")
+
+        expected_size = self.num_uavs * action_dim
+        if action_arr.size != expected_size:
+            raise ValueError(f"Invalid multi-uav action size {action_arr.size}, expected {expected_size}.")
+
+        action_split_list = [action_arr[i*action_dim:(i+1)*action_dim] for i in range(self.num_uavs)]
+
+        return action_arr, action_split_list
 
     def get_uav_action_position_map(self, action_split_list=None, position_list=None):
         if self.num_uavs <= 1:
@@ -1165,6 +1192,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             action_position_map = info.get('uav_action_position_map', None)
             if action_position_map is not None:
                 self.client.simPrintLogMessage('UAV Action-Pos: ', str(action_position_map))
+                # Also print to Python console for easier debugging outside AirSim HUD.
+                print(f"[Console][EP {self.episode_num} STEP {self.step_num}] UAV Action-Pos: {action_position_map}")
         self.client.simPrintLogMessage(
             'Feature_norm: ', str(self.dynamic_model.state_norm))
         self.client.simPrintLogMessage(
@@ -1205,13 +1234,13 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         action = np.asarray(action)
 
         if self.num_uavs > 1:
-            action_dim = self.dynamic_models[0].action_space.shape[0]
+            action, action_split = self._split_multi_uav_action(action)
             action_output_list = []
             state_output_list = []
             attitude_real_list = []
             attitude_cmd_list = []
             for i, model in enumerate(self.dynamic_models):
-                action_i = action[i*action_dim:(i+1)*action_dim]
+                action_i = action_split[i]
                 state_i = model.state_raw
                 if model.navigation_3d:
                     action_output_i = action_i
