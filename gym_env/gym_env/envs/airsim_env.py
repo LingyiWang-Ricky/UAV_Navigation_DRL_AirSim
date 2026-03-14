@@ -1176,6 +1176,17 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.reward_signal.emit(step, reward, self.cumulated_episode_reward)
 
         if self.num_uavs > 1:
+            traj_plot = np.asarray(self.trajectory_list, dtype=np.float32)
+            current_pose = np.asarray([model.get_position() for model in self.dynamic_models], dtype=np.float32)
+            goal_pose = np.asarray([model.goal_position for model in self.dynamic_models], dtype=np.float32)
+            start_pose = np.asarray([model.start_position for model in self.dynamic_models], dtype=np.float32)
+        else:
+            traj_plot = np.asarray(self.trajectory_list)
+            current_pose = np.asarray(self.dynamic_model.get_position())
+            goal_pose = np.asarray(dynamic_model_plot.goal_position)
+            start_pose = np.asarray(dynamic_model_plot.start_position)
+
+        self.pose_signal.emit(goal_pose, start_pose, current_pose, traj_plot)
             traj_plot = np.asarray([pose_list[0] for pose_list in self.trajectory_list], dtype=np.float32)
             current_pose = np.asarray(dynamic_model_plot.get_position())
         else:
