@@ -163,6 +163,52 @@ Now we provide 3 training envrionment and 3 dynamics.
 * Multirotor
 * SimpleFixedwing
 
+## Two-UAV cooperative setup (independent observations and actions)
+
+This project now supports controlling two multirotors in one environment step.
+
+1. In config (e.g. `configs/config_Maze_SimpleMultirotor_2D.ini`), set:
+
+   ```ini
+   num_uavs = 2
+   uav_names = Drone1,Drone2
+   ```
+
+2. In AirSim settings (e.g. `airsim_settings/settings_multirotor.json`), define both vehicles under `Vehicles`:
+
+   ```json
+   "Vehicles": {
+     "Drone1": {"VehicleType": "SimpleFlight", "X": 0, "Y": 0, "Z": 0},
+     "Drone2": {"VehicleType": "SimpleFlight", "X": 2, "Y": 0, "Z": 0}
+   }
+   ```
+
+3. Keep `dynamic_name = Multirotor` (or `SimpleMultirotor`) and train as usual.
+
+Notes:
+- Each UAV has independent observations and executes its own action each step.
+- The environment exposes a concatenated action/observation interface for SB3 compatibility.
+
+Quick diagnostic before training:
+
+```bash
+python tools/test/airsim_multi_uav_check.py --vehicles Drone1 Drone2
+```
+
+If your AirSim RPC is not on default host/port, use:
+
+```bash
+python tools/test/airsim_multi_uav_check.py --host 127.0.0.1 --port 41451 --vehicles Drone1 Drone2
+```
+
+If this check fails, fix AirSim `settings.json` vehicles and simulator startup first.
+
+If you see `Connection failed: Request timed out`:
+
+- Wait for UE/AirSim scene to fully load, then run the checker again.
+- Ensure your `Documents/AirSim/settings.json` is actually the one used by AirSim.
+- Verify RPC port. The checker now prints detected open ports in `41451-41460` when handshake fails.
+
 ## GUI for training and evaluation
 
 ![img](resources/figures/gui_for_train_and_eval.png)
