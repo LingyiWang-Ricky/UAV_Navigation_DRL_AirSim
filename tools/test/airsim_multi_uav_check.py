@@ -177,6 +177,10 @@ def main() -> int:
 
     if last_exc is not None:
         print(f"Connection failed: {last_exc}")
+    try:
+        client.confirmConnection()
+    except Exception as exc:  # noqa: BLE001
+        print(f"Connection failed: {exc}")
         print("Hint: check SimMode=Multirotor and whether RPC server is listening.")
         common_ports = list(range(41451, 41461))
         open_ports = scan_open_ports(args.host, common_ports, timeout_s=0.2)

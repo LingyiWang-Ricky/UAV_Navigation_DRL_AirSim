@@ -1187,6 +1187,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             start_pose = np.asarray(dynamic_model_plot.start_position)
 
         self.pose_signal.emit(goal_pose, start_pose, current_pose, traj_plot)
+            traj_plot = np.asarray([pose_list[0] for pose_list in self.trajectory_list], dtype=np.float32)
+            current_pose = np.asarray(dynamic_model_plot.get_position())
+        else:
+            traj_plot = np.asarray(self.trajectory_list)
+            current_pose = np.asarray(self.dynamic_model.get_position())
+
+        self.pose_signal.emit(np.asarray(dynamic_model_plot.goal_position), np.asarray(
+            dynamic_model_plot.start_position), current_pose, traj_plot)
 
     def visual_log_q_value(self, q_value, action, reward):
         '''
