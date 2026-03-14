@@ -284,8 +284,19 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self.last_action_split_list = action_split_list
             self.last_position_list = position_ue4
 
-            if self.step_num % 50 == 0:
-                print(f"multi-uav step {self.step_num} action={np.array(action_split_list)} pos={np.array(position_ue4)}")
+            action_pos_map = self.get_uav_action_position_map(action_split_list, position_ue4)
+            print(f"multi-uav step {self.step_num} action_pos={action_pos_map}")
+
+            # runtime warning for common misconfiguration: both names mapped to same vehicle
+            if len(position_ue4) >= 2:
+                ref = np.asarray(position_ue4[0], dtype=np.float32)
+                same_pose = True
+                for p in position_ue4[1:]:
+                    if not np.allclose(ref, np.asarray(p, dtype=np.float32), atol=1e-3):
+                        same_pose = False
+                        break
+                if same_pose and self.step_num % 20 == 0:
+                    print("[Warning] Multi-UAV positions are identical at this step. Check AirSim vehicle_name mapping.")
 
         if self.num_uavs == 1:
             position_ue4 = self.dynamic_model.get_position()

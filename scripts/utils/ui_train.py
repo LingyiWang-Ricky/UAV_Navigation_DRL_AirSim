@@ -581,13 +581,18 @@ class TrainingUi(QWidget):
         for i in range(start.shape[0]):
             pen = pen_list[i % len(pen_list)]
             symbol = symbol_list[i % len(symbol_list)]
-            self.traj_pw.plot([start[i, 0]], [start[i, 1]], symbol=symbol, symbolSize=10, symbolBrush=pen.color())
-            self.traj_pw.plot([goal[i, 0]], [goal[i, 1]], symbol=symbol, symbolSize=10, symbolBrush=pen.color())
+            # If trajectories overlap exactly (e.g. same mapped vehicle), add a tiny
+            # visual-only offset so users can still see each UAV trace separately.
+            vis_dx = 0.35 * i
+            vis_dy = -0.35 * i
+
+            self.traj_pw.plot([start[i, 0] + vis_dx], [start[i, 1] + vis_dy], symbol=symbol, symbolSize=10, symbolBrush=pen.color())
+            self.traj_pw.plot([goal[i, 0] + vis_dx], [goal[i, 1] + vis_dy], symbol=symbol, symbolSize=10, symbolBrush=pen.color())
             if np.asarray(current_pose).ndim == 2 and current_pose.shape[0] > i:
-                self.traj_pw.plot([current_pose[i, 0]], [current_pose[i, 1]], symbol=symbol, symbolSize=8, symbolBrush=pen.color())
+                self.traj_pw.plot([current_pose[i, 0] + vis_dx], [current_pose[i, 1] + vis_dy], symbol=symbol, symbolSize=8, symbolBrush=pen.color())
 
             if traj_arr.ndim == 3 and traj_arr.shape[1] > i:
-                self.traj_pw.plot(traj_arr[:, i, 0], traj_arr[:, i, 1], pen=pen)
+                self.traj_pw.plot(traj_arr[:, i, 0] + vis_dx, traj_arr[:, i, 1] + vis_dy, pen=pen)
 
 
 def main():
