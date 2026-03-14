@@ -494,11 +494,26 @@ class TrainingUi(QWidget):
         if self.cfg.get('options', 'env_name') in background_list:
             self.traj_pw.addItem(self.background_img)
 
-        # plot start, goal and trajectory
-        self.traj_pw.plot([start[0]], [start[1]], symbol='o')
-        self.traj_pw.plot([goal[0]], [goal[1]], symbol='o')
-        self.traj_pw.plot(
-            trajectory_list[..., 0], trajectory_list[..., 1], pen=self.pen_red)
+        # single-uav: (3,), multi-uav: (N,3)
+        if np.asarray(start).ndim == 1:
+            # plot start, goal and trajectory
+            self.traj_pw.plot([start[0]], [start[1]], symbol='o')
+            self.traj_pw.plot([goal[0]], [goal[1]], symbol='o')
+            self.traj_pw.plot(
+                trajectory_list[..., 0], trajectory_list[..., 1], pen=self.pen_red)
+            return
+
+        # Multi-UAV visualization
+        traj_arr = np.asarray(trajectory_list)
+        pen_list = [self.pen_red, self.pen_blue, self.pen_green, self.pen_yellow]
+
+        for i in range(start.shape[0]):
+            pen = pen_list[i % len(pen_list)]
+            self.traj_pw.plot([start[i, 0]], [start[i, 1]], symbol='o', symbolBrush=pen.color())
+            self.traj_pw.plot([goal[i, 0]], [goal[i, 1]], symbol='o', symbolBrush=pen.color())
+
+            if traj_arr.ndim == 3 and traj_arr.shape[1] > i:
+                self.traj_pw.plot(traj_arr[:, i, 0], traj_arr[:, i, 1], pen=pen)
 
 
 def main():
