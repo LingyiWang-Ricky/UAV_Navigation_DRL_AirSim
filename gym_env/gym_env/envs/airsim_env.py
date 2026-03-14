@@ -1176,6 +1176,15 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             state_output = np.asarray(state_output_list)
             attitude_real = np.asarray(attitude_real_list)
             attitude_cmd = np.asarray(attitude_cmd_list)
+            action = action[0:action_dim]
+
+        dynamic_model_plot = self.dynamic_models[0]
+
+        # transfer 2D state and action to 3D
+        state = dynamic_model_plot.state_raw
+        if dynamic_model_plot.navigation_3d:
+            action_output = action
+            state_output = state
         else:
             dynamic_model_plot = self.dynamic_models[0]
             # transfer 2D state and action to 3D
@@ -1194,6 +1203,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         # other values
         self.attitude_signal.emit(step, attitude_real, attitude_cmd)
+        self.attitude_signal.emit(step, np.asarray(dynamic_model_plot.get_attitude(
+        )), np.asarray(dynamic_model_plot.get_attitude_cmd()))
         self.reward_signal.emit(step, reward, self.cumulated_episode_reward)
 
         if self.num_uavs > 1:
@@ -1208,6 +1219,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             start_pose = np.asarray(dynamic_model_plot.start_position)
 
         self.pose_signal.emit(goal_pose, start_pose, current_pose, traj_plot)
+            traj_plot = np.asarray([pose_list[0] for pose_list in self.trajectory_list], dtype=np.float32)
+            current_pose = np.asarray(dynamic_model_plot.get_position())
+        else:
+            traj_plot = np.asarray(self.trajectory_list)
+            current_pose = np.asarray(self.dynamic_model.get_position())
+
+        self.pose_signal.emit(np.asarray(dynamic_model_plot.goal_position), np.asarray(
+            dynamic_model_plot.start_position), current_pose, traj_plot)
 
     def visual_log_q_value(self, q_value, action, reward):
         '''
