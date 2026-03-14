@@ -61,10 +61,36 @@ class TrainingThread(QtCore.QThread):
         print('TrainingThread terminated')
 
     def get_base_env(self):
-        """Unwrap gym wrappers to access the original AirsimGymEnv instance."""
+        """Unwrap wrappers to access the original AirsimGymEnv instance.
+
+        Handles common gym/gymnasium wrappers and vec-env style containers.
+        """
         env = self.env
-        while hasattr(env, 'env'):
-            env = env.env
+        visited_ids = set()
+
+        while env is not None and id(env) not in visited_ids:
+            visited_ids.add(id(env))
+
+            # Fast path: we reached the target env implementation.
+            if hasattr(env, 'set_config') and hasattr(env, 'dynamic_model'):
+                return env
+
+            # Common wrapper styles
+            if hasattr(env, 'unwrapped') and env.unwrapped is not env:
+                env = env.unwrapped
+                continue
+            if hasattr(env, 'env'):
+                env = env.env
+                continue
+            if hasattr(env, 'venv'):
+                env = env.venv
+                continue
+            if hasattr(env, 'envs') and len(env.envs) > 0:
+                env = env.envs[0]
+                continue
+
+            break
+
         return env
 
     def run(self):
@@ -74,6 +100,12 @@ class TrainingThread(QtCore.QThread):
 
         # Initialize env config in worker thread (may connect to AirSim)
         base_env = self.get_base_env()
+        print(f"Env runtime type -> wrapped={type(self.env).__name__} base={type(base_env).__name__}")
+        if not hasattr(base_env, 'set_config'):
+            raise RuntimeError(
+                f"Cannot find set_config() on base env (type={type(base_env).__name__}). "
+                "Please check gym wrapper compatibility."
+            )
         base_env.set_config(self.cfg)
         cfg_num_uavs = self.cfg.getint('options', 'num_uavs', fallback=1)
         env_num_uavs = getattr(base_env, 'num_uavs', 'N/A')
