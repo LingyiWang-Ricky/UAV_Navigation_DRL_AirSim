@@ -756,6 +756,23 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         return feature_all
 
+    def _get_active_dynamic_model(self):
+        if self._active_uav_idx is None:
+            return self.dynamic_model
+        return self.dynamic_models[self._active_uav_idx]
+
+    def _get_active_min_distance_to_obstacles(self):
+        if self.num_uavs <= 1:
+            return getattr(self, 'min_distance_to_obstacles', float(self.max_depth_meters))
+
+        idx = self._active_uav_idx if self._active_uav_idx is not None else 0
+        depth_all = getattr(self, 'min_distance_to_obstacles_all', None)
+        if depth_all is not None and len(depth_all) > idx:
+            return float(depth_all[idx])
+
+        # fallback for unexpected flow
+        return getattr(self, 'min_distance_to_obstacles', float(self.max_depth_meters))
+
     def compute_multi_uav_reward(self, done, action):
         action = np.asarray(action)
         action_dim = self.dynamic_models[0].action_space.shape[0]
@@ -830,7 +847,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         reward_reach = 10
         reward_crash = -20
         reward_outside = -10
-        
+        dynamic_model = self._get_active_dynamic_model()
+
         if self.env_name == 'NH_center':
             distance_reward_coef = 500
         else:
@@ -839,13 +857,12 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if not done:
             # 1 - goal reward
             distance_now = self.get_distance_to_goal_3d()
-            reward_distance = distance_reward_coef * (self.previous_distance_from_des_point - distance_now) / \
-                self.dynamic_model.goal_distance   # normalized to 100 according to goal_distance
+            reward_distance = distance_reward_coef * (self.previous_distance_from_des_point - distance_now) /                 dynamic_model.goal_distance   # normalized to 100 according to goal_distance
             self.previous_distance_from_des_point = distance_now
 
             # 2 - Position punishment
-            current_pose = self.dynamic_model.get_position()
-            goal_pose = self.dynamic_model.goal_position
+            current_pose = dynamic_model.get_position()
+            goal_pose = dynamic_model.goal_position
             x = current_pose[0]
             y = current_pose[1]
             z = current_pose[2]
@@ -859,30 +876,30 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
             punishment_pose = punishment_xy + punishment_z
 
-            if self.min_distance_to_obstacles < 10:
-                punishment_obs = 1 - np.clip((self.min_distance_to_obstacles - self.crash_distance) / 5, 0, 1)
+            min_depth = self._get_active_min_distance_to_obstacles()
+            if min_depth < 10:
+                punishment_obs = 1 - np.clip((min_depth - self.crash_distance) / 5, 0, 1)
             else:
                 punishment_obs = 0
 
             punishment_action = 0
 
             # add yaw_rate cost
-            yaw_speed_cost = abs(action[-1]) / self.dynamic_model.yaw_rate_max_rad
+            yaw_speed_cost = abs(action[-1]) / dynamic_model.yaw_rate_max_rad
 
-            if self.dynamic_model.navigation_3d:
+            if dynamic_model.navigation_3d:
                 # add action and z error cost
-                v_z_cost = ((abs(action[1]) / self.dynamic_model.v_z_max)**2)
+                v_z_cost = ((abs(action[1]) / dynamic_model.v_z_max)**2)
                 z_err_cost = (
-                    (abs(self.dynamic_model.state_raw[1]) / self.dynamic_model.max_vertical_difference)**2)
+                    (abs(dynamic_model.state_raw[1]) / dynamic_model.max_vertical_difference)**2)
                 punishment_action += (v_z_cost + z_err_cost)
 
             punishment_action += yaw_speed_cost
 
-            yaw_error = self.dynamic_model.state_raw[2]
+            yaw_error = dynamic_model.state_raw[2]
             yaw_error_cost = abs(yaw_error / 90)
 
-            reward = reward_distance - 0.1 * punishment_pose - 0.2 * \
-                punishment_obs - 0.1 * punishment_action - 0.5 * yaw_error_cost
+            reward = reward_distance - 0.1 * punishment_pose - 0.2 *                 punishment_obs - 0.1 * punishment_action - 0.5 * yaw_error_cost
         else:
             if self.is_in_desired_pose():
                 reward = reward_reach
@@ -1045,23 +1062,25 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         reward_outside = 0
 
         if not done:
+            dynamic_model = self._get_active_dynamic_model()
             distance_now = self.get_distance_to_goal_3d()
             reward_distance = (self.previous_distance_from_des_point -
-                               distance_now) / self.dynamic_model.goal_distance * 5
+                               distance_now) / dynamic_model.goal_distance * 5
             self.previous_distance_from_des_point = distance_now
 
             state_cost = 0
             action_cost = 0
             obs_cost = 0
 
-            yaw_error_deg = self.dynamic_model.state_raw[1]
+            yaw_error_deg = dynamic_model.state_raw[1]
 
             relative_yaw_cost = abs(yaw_error_deg/180)
-            action_cost = abs(action[1]) / self.dynamic_model.yaw_rate_max_rad
+            action_cost = abs(action[1]) / dynamic_model.yaw_rate_max_rad
 
             obs_punish_dist = 5
-            if self.min_distance_to_obstacles < obs_punish_dist:
-                obs_cost = 1 - (self.min_distance_to_obstacles -
+            min_depth = self._get_active_min_distance_to_obstacles()
+            if min_depth < obs_punish_dist:
+                obs_cost = 1 - (min_depth -
                                 self.crash_distance) / (obs_punish_dist - self.crash_distance)
                 obs_cost = 0.5 * obs_cost ** 2
             reward = - (2 * relative_yaw_cost + 0.5 * action_cost)
