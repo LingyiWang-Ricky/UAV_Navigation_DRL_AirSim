@@ -52,6 +52,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.task_type = cfg.get('options', 'task_type', fallback='goal_nav')
         self.uav_start_separation = cfg.getfloat('options', 'uav_start_separation', fallback=10.0)
         self.catch_distance = cfg.getfloat('options', 'catch_distance', fallback=5.0)
+        self.dual_policy = cfg.getboolean('options', 'dual_policy', fallback=False)
+        self.control_role = cfg.get('options', 'control_role', fallback='all')
+        self.opponent_model = None
         uav_names_raw = cfg.get('options', 'uav_names', fallback='Drone1,Drone2')
         self.uav_names = [name.strip() for name in uav_names_raw.split(',') if name.strip()]
         if len(self.uav_names) < self.num_uavs:
@@ -242,14 +245,17 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                                                        self.screen_width, 2 * self.num_uavs),
                                                 dtype=np.uint8)
 
+        self.base_action_space = self.dynamic_model.action_space
         if self.num_uavs == 1:
-            self.action_space = self.dynamic_model.action_space
+            self.action_space = self.base_action_space
         else:
-            base_action_space = self.dynamic_model.action_space
             self.action_space = spaces.Box(
-                low=np.tile(base_action_space.low, self.num_uavs),
-                high=np.tile(base_action_space.high, self.num_uavs),
+                low=np.tile(self.base_action_space.low, self.num_uavs),
+                high=np.tile(self.base_action_space.high, self.num_uavs),
                 dtype=np.float32)
+
+        if self.dual_policy and self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
+            self._update_action_space_for_role()
 
         self.reward_type = None
         try:
@@ -360,6 +366,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if self.num_uavs > 1:
             self._check_multi_uav_binding()
 
+        self.last_obs = obs
         return obs
 
     def _check_multi_uav_binding(self):
@@ -376,6 +383,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             print(f"[Warning] _check_multi_uav_binding failed: {e}")
 
     def step(self, action):
+        if self.dual_policy and self.task_type == 'pursuit_2v1' and self.num_uavs > 1 and self.control_role in ['pursuer', 'evader']:
+            action = self._compose_full_action_for_dual_policy(action)
+
         # set action
         if self.num_uavs == 1 and self.dynamic_name == 'SimpleFixedwing':
             # add step to calculate pitch flap deg Fixed wing only
@@ -416,6 +426,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         # get new obs
         obs = self.get_obs()
+        self.last_obs = obs
         done = self.is_done()
         info = {
             'is_success': self.is_in_desired_pose(),
@@ -435,6 +446,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         elif self.num_uavs > 1:
             if self.task_type == 'pursuit_2v1':
                 reward = self.compute_pursuit_reward(done)
+                if self.dual_policy and self.control_role == 'pursuer':
+                    reward = self.last_pursuer_reward
+                elif self.dual_policy and self.control_role == 'evader':
+                    reward = self.last_evader_reward
             else:
                 reward = self.compute_multi_uav_reward(done, action)
         elif self.reward_type == 'reward_with_action':
@@ -528,6 +543,62 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         return action_arr, action_split_list
 
+    def _update_action_space_for_role(self):
+        action_dim = self.base_action_space.shape[0]
+        if self.control_role == 'pursuer':
+            count = len(self.pursuer_indices)
+        elif self.control_role == 'evader':
+            count = 1
+        else:
+            count = self.num_uavs
+        self.action_space = spaces.Box(
+            low=np.tile(self.base_action_space.low, count),
+            high=np.tile(self.base_action_space.high, count),
+            dtype=np.float32)
+
+    def set_control_role(self, role):
+        self.control_role = role
+        if self.dual_policy and self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
+            self._update_action_space_for_role()
+
+    def set_opponent_model(self, model):
+        self.opponent_model = model
+
+    def _sample_or_predict_opponent_action(self):
+        action_dim = self.base_action_space.shape[0]
+        if self.opponent_model is None or not hasattr(self, 'last_obs'):
+            return self.base_action_space.sample()
+        try:
+            action, _ = self.opponent_model.predict(self.last_obs, deterministic=True)
+            action = np.asarray(action, dtype=np.float32).reshape(-1)
+            if action.size >= action_dim:
+                return action[:action_dim]
+        except Exception:
+            pass
+        return self.base_action_space.sample()
+
+    def _compose_full_action_for_dual_policy(self, action):
+        action = np.asarray(action, dtype=np.float32).reshape(-1)
+        action_dim = self.base_action_space.shape[0]
+        full_action = np.zeros(self.num_uavs * action_dim, dtype=np.float32)
+
+        if self.control_role == 'pursuer':
+            pursuer_action = action.reshape(len(self.pursuer_indices), action_dim)
+            for k, idx in enumerate(self.pursuer_indices):
+                full_action[idx*action_dim:(idx+1)*action_dim] = pursuer_action[k]
+            evader_act = self._sample_or_predict_opponent_action()
+            full_action[self.evader_index*action_dim:(self.evader_index+1)*action_dim] = evader_act
+        elif self.control_role == 'evader':
+            evader_act = action[:action_dim]
+            full_action[self.evader_index*action_dim:(self.evader_index+1)*action_dim] = evader_act
+            for idx in self.pursuer_indices:
+                pursuer_act = self._sample_or_predict_opponent_action()
+                full_action[idx*action_dim:(idx+1)*action_dim] = pursuer_act
+        else:
+            full_action = action
+
+        return full_action
+
     def _update_pursuit_goals(self):
         if self.task_type != 'pursuit_2v1' or self.num_uavs <= 1:
             return
@@ -590,8 +661,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         self.prev_pursuit_distances = curr_distances
 
-        # single scalar for current centralized policy
-        return float(np.mean(pursuer_rewards) + evader_reward)
+        self.last_pursuer_reward = float(np.mean(pursuer_rewards))
+        self.last_evader_reward = float(evader_reward)
+        # single scalar for centralized policy / fallback
+        return float(self.last_pursuer_reward + self.last_evader_reward)
 
     def get_uav_action_position_map(self, action_split_list=None, position_list=None):
         if self.num_uavs <= 1:
