@@ -1,5 +1,16 @@
 from .custom_policy_sb3 import CNN_FC, CNN_GAP, CNN_GAP_BN, No_CNN, CNN_MobileNet, CNN_GAP_new
 import datetime
+import os
+import sys
+from pathlib import Path
+
+# Ensure we import the repository-local gym_env package (./gym_env/gym_env)
+# instead of an older site-packages installation.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+LOCAL_GYM_ENV_PARENT = REPO_ROOT / 'gym_env'
+if LOCAL_GYM_ENV_PARENT.exists() and str(LOCAL_GYM_ENV_PARENT) not in sys.path:
+    sys.path.insert(0, str(LOCAL_GYM_ENV_PARENT))
+
 import gym
 import gym_env
 import numpy as np
@@ -12,8 +23,7 @@ import argparse
 import ast
 from configparser import ConfigParser
 import torch as th
-import os
-import sys
+
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.dirname(CURRENT_DIR))
 
