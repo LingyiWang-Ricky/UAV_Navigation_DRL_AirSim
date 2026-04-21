@@ -58,6 +58,12 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self.uav_names += [f"Drone{i+1}" for i in range(len(self.uav_names), self.num_uavs)]
         self._active_uav_idx = None
         self._resolve_uav_names_with_airsim()
+        discovered_count = len(getattr(self, 'discovered_uav_names', []))
+        if self.num_uavs > 1 and discovered_count > 0 and discovered_count < self.num_uavs:
+            raise ValueError(
+                f"Configured num_uavs={self.num_uavs}, but AirSim/settings only provide {discovered_count} vehicles: "
+                f"{self.discovered_uav_names}. Please add missing UAVs in settings.json."
+            )
         print(f"UAV setup -> num_uavs={self.num_uavs}, uav_names={self.uav_names[:self.num_uavs]}, start_separation={self.uav_start_separation}")
 
         # create LGMD agent
@@ -294,6 +300,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                     print(f"[Warning] Failed to parse settings file {sp}: {e}")
 
         if not candidates:
+            self.discovered_uav_names = []
             print('[Warning] Could not discover UAV names from AirSim or settings. Keep config uav_names as-is.')
             return
 
@@ -303,6 +310,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             if name not in ordered_candidates:
                 ordered_candidates.append(name)
         candidates = ordered_candidates
+        self.discovered_uav_names = candidates
 
         missing_names = [name for name in configured_names if name not in candidates]
         print(f"UAV name discovery -> candidates={candidates}, configured={configured_names}")
