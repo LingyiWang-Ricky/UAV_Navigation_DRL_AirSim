@@ -877,6 +877,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             reward_list.append(reward_i)
 
         self._active_uav_idx = None
+        self._resolve_uav_names_with_airsim()
         return float(np.mean(reward_list))
 # ! ---------------------calculate rewards-------------------------------------
 
@@ -1315,6 +1316,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 in_desired_pose = False
                 break
         self._active_uav_idx = None
+        self._resolve_uav_names_with_airsim()
 
         return in_desired_pose
 
