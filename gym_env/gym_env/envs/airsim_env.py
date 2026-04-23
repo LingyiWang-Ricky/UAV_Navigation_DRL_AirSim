@@ -335,18 +335,34 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             print('[Info] Configured uav_names validated with discovered UAV names.')
 
     def reset(self):
-        # reset state
-        if self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
-            self._randomize_pursuit_start_positions()
+        # reset state (with retry for invalid spawn states)
+        max_reset_retries = 6
+        reset_ok = False
+        for attempt in range(max_reset_retries):
+            if self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
+                self._randomize_pursuit_start_positions()
 
-        if self.dynamic_name == 'Multirotor':
-            # reset AirSim world only once to avoid repeated global resets when using multiple UAVs
-            self.client.reset()
-            for dynamic_model in self.dynamic_models:
-                dynamic_model.reset(do_client_reset=False)
-        else:
-            for dynamic_model in self.dynamic_models:
-                dynamic_model.reset()
+            if self.dynamic_name == 'Multirotor':
+                # reset AirSim world only once to avoid repeated global resets when using multiple UAVs
+                self.client.reset()
+                for dynamic_model in self.dynamic_models:
+                    dynamic_model.reset(do_client_reset=False)
+            else:
+                for dynamic_model in self.dynamic_models:
+                    dynamic_model.reset()
+
+            if self.task_type != 'pursuit_2v1' or self.num_uavs <= 1:
+                reset_ok = True
+                break
+
+            reset_ok = self._is_valid_reset_state()
+            if reset_ok:
+                break
+
+            print(f"[Reset-Retry] invalid spawn state detected (attempt {attempt+1}/{max_reset_retries}), re-randomizing...")
+
+        if not reset_ok and self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
+            print('[Warning] reset retries exhausted; continuing with current spawn state.')
 
         self.episode_num += 1
         self.step_num = 0
@@ -402,6 +418,40 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         for i, model in enumerate(self.dynamic_models):
             sx, sy = sampled_xy[i]
             model.start_position = [float(sx), float(sy), z]
+
+    def _is_valid_reset_state(self):
+        """Check whether freshly reset UAV states are valid for training."""
+        try:
+            positions = [np.asarray(model.get_position(), dtype=np.float32) for model in self.dynamic_models]
+
+            # 1) workspace and altitude sanity
+            for pos in positions:
+                if pos[0] < self.work_space_x[0] or pos[0] > self.work_space_x[1]:
+                    return False
+                if pos[1] < self.work_space_y[0] or pos[1] > self.work_space_y[1]:
+                    return False
+                if pos[2] < max(self.work_space_z[0], 0.8):
+                    return False
+
+            # 2) pairwise spawn separation (avoid overlap at episode start)
+            min_pair_dist = max(self.uav_start_separation * 0.6, 4.0)
+            for i in range(len(positions)):
+                for j in range(i + 1, len(positions)):
+                    if np.linalg.norm(positions[i] - positions[j]) < min_pair_dist:
+                        return False
+
+            # 3) immediate collision check
+            for model in self.dynamic_models:
+                try:
+                    collision_info = model.client.simGetCollisionInfo(vehicle_name=getattr(model, 'vehicle_name', ''))
+                except TypeError:
+                    collision_info = model.client.simGetCollisionInfo()
+                if collision_info.has_collided:
+                    return False
+
+            return True
+        except Exception:
+            return False
 
     def _check_multi_uav_binding(self):
         if self.num_uavs <= 1:
