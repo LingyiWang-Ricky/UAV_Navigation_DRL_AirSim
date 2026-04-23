@@ -16,13 +16,34 @@
       "X": 2,
       "Y": 0,
       "Z": 0
+    },
+    "Drone3": {
+      "VehicleType": "SimpleFlight",
+      "X": 4,
+      "Y": 0,
+      "Z": 0
     }
   },
   "SubWindows": [
-    {"WindowID": 0, "CameraID": 0, "ImageType": 0, "Visible": true},
-    {"WindowID": 1, "CameraID": 0, "ImageType": 3, "Visible": false},
-    {"WindowID": 2, "CameraID": 0, "ImageType": 3, "Visible": true}
-    ],
+    {
+      "WindowID": 0,
+      "CameraID": 0,
+      "ImageType": 0,
+      "Visible": true
+    },
+    {
+      "WindowID": 1,
+      "CameraID": 0,
+      "ImageType": 3,
+      "Visible": false
+    },
+    {
+      "WindowID": 2,
+      "CameraID": 0,
+      "ImageType": 3,
+      "Visible": true
+    }
+  ],
   "CameraDefaults": {
     "CaptureSettings": [
       {
