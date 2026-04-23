@@ -754,14 +754,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             # dense chase shaping + urgency penalty
             r = 3.0 * (prev_d - curr_d) - 0.05 + near_catch_bonus
             if caught:
-                r += 30.0
+                r += 50.0
             pursuer_rewards.append(r)
 
         prev_mean = float(np.mean(prev_distances))
         curr_mean = float(np.mean(curr_distances))
         evader_reward = 3.0 * (curr_mean - prev_mean) + 0.05
         if caught:
-            evader_reward -= 30.0
+            evader_reward -= 50.0
 
         self.prev_pursuit_distances = curr_distances
 
