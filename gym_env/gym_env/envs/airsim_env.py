@@ -47,6 +47,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.dynamic_name = cfg.get('options', 'dynamic_name')
         self.keyboard_debug = cfg.getboolean('options', 'keyboard_debug')
         self.generate_q_map = cfg.getboolean('options', 'generate_q_map')
+        self.step_log = cfg.getboolean('options', 'step_log', fallback=False)
         self.perception_type = cfg.get('options', 'perception')
         self.num_uavs = cfg.getint('options', 'num_uavs', fallback=1)
         self.task_type = cfg.get('options', 'task_type', fallback='goal_nav')
@@ -356,6 +357,11 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.trajectory_list = []
         self.last_action_split_list = None
         self.last_position_list = None
+        self.episode_uav_rewards = np.zeros(self.num_uavs, dtype=np.float32)
+
+        if self.task_type == 'pursuit_2v1':
+            self._update_pursuit_goals()
+            self._update_pursuit_distance_cache()
 
         if self.task_type == 'pursuit_2v1':
             self._update_pursuit_goals()
@@ -404,7 +410,6 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self.last_position_list = position_ue4
 
             action_pos_map = self.get_uav_action_position_map(action_split_list, position_ue4)
-            print(f"multi-uav step {self.step_num} action_pos={action_pos_map}")
 
             # runtime warning for common misconfiguration: both names mapped to same vehicle
             if len(position_ue4) >= 2:
@@ -437,7 +442,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if self.num_uavs > 1:
             info['uav_action_position_map'] = self.get_uav_action_position_map(action_split_list, position_ue4)
         if done:
-            print(info)
+            self.print_episode_summary(info)
 
         # ----------------compute reward---------------------------
         if self.num_uavs == 1 and self.dynamic_name == 'SimpleFixedwing':
@@ -465,8 +470,19 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         self.cumulated_episode_reward += reward
 
+        if self.num_uavs > 1:
+            if self.task_type == 'pursuit_2v1':
+                pursuer_rewards = [self.last_pursuer_reward for _ in self.pursuer_indices]
+                role_rewards = pursuer_rewards + [self.last_evader_reward]
+                self.last_multi_uav_reward_list = role_rewards
+            if hasattr(self, 'last_multi_uav_reward_list') and len(self.last_multi_uav_reward_list) >= self.num_uavs:
+                self.episode_uav_rewards += np.asarray(self.last_multi_uav_reward_list[:self.num_uavs], dtype=np.float32)
+        else:
+            self.episode_uav_rewards[0] += float(reward)
+
         # ----------------print info---------------------------
-        self.print_train_info_airsim(action, obs, reward, info)
+        if self.step_log:
+            self.print_train_info_airsim(action, obs, reward, info)
 
         if self.cfg.get('options', 'dynamic_name') == 'SimpleFixedwing':
             self.set_pyqt_signal_fixedwing(action, reward, done)
@@ -977,7 +993,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             reward_list.append(reward_i)
 
         self._active_uav_idx = None
-        self._resolve_uav_names_with_airsim()
+        self.last_multi_uav_reward_list = reward_list
         return float(np.mean(reward_list))
 # ! ---------------------calculate rewards-------------------------------------
 
@@ -1466,6 +1482,23 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         return dis
 # ! -----------used for plot or show states------------------------------------------------------------------
+
+    def print_episode_summary(self, info):
+        steps = max(1, self.step_num + 1)
+        avg_uav_rewards = (self.episode_uav_rewards / steps).tolist() if hasattr(self, 'episode_uav_rewards') else []
+        summary = {
+            'episode': self.episode_num,
+            'steps': self.step_num,
+            'total_step': self.total_step,
+            'avg_uav_rewards': avg_uav_rewards,
+            'episode_reward': float(self.cumulated_episode_reward),
+            'is_success': info.get('is_success'),
+            'is_crash': info.get('is_crash'),
+            'is_not_in_workspace': info.get('is_not_in_workspace')
+        }
+        print('[EP-SUMMARY]', summary)
+        if self.num_uavs > 1 and 'uav_action_position_map' in info:
+            print('[EP-SUMMARY][FinalPose]', info['uav_action_position_map'])
 
     def print_train_info_airsim(self, action, obs, reward, info):
         # if self.perception_type == 'split' or self.perception_type == 'lgmd':
