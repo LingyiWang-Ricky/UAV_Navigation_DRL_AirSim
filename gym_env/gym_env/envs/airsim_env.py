@@ -375,22 +375,33 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         return obs
 
     def _randomize_pursuit_start_positions(self):
-        """Randomize episode starts for pursuit task to avoid overfitting fixed spawns."""
+        """Randomize episode starts for pursuit task with wider spread and min-distance constraint."""
         if self.num_uavs <= 1:
             return
 
-        margin = 25.0
-        cx = np.random.uniform(self.work_space_x[0] + margin, self.work_space_x[1] - margin)
-        cy = np.random.uniform(self.work_space_y[0] + margin, self.work_space_y[1] - margin)
+        margin = 20.0
+        min_pair_dist = max(self.uav_start_separation * 1.2, 10.0)
         z = float(self.dynamic_models[0].start_position[2]) if len(self.dynamic_models[0].start_position) > 2 else 5.0
 
-        # distribute UAVs around random center
+        sampled_xy = []
+        for i in range(self.num_uavs):
+            chosen = None
+            for _ in range(300):
+                sx = np.random.uniform(self.work_space_x[0] + margin, self.work_space_x[1] - margin)
+                sy = np.random.uniform(self.work_space_y[0] + margin, self.work_space_y[1] - margin)
+                if all(np.hypot(sx - px, sy - py) >= min_pair_dist for px, py in sampled_xy):
+                    chosen = (sx, sy)
+                    break
+            if chosen is None:
+                # fallback: still keep inside workspace
+                sx = np.random.uniform(self.work_space_x[0] + margin, self.work_space_x[1] - margin)
+                sy = np.random.uniform(self.work_space_y[0] + margin, self.work_space_y[1] - margin)
+                chosen = (sx, sy)
+            sampled_xy.append(chosen)
+
         for i, model in enumerate(self.dynamic_models):
-            theta = np.random.uniform(-np.pi, np.pi)
-            r = self.uav_start_separation * (0.8 + 0.4 * np.random.rand()) * i
-            sx = float(np.clip(cx + r * np.cos(theta), self.work_space_x[0] + 5, self.work_space_x[1] - 5))
-            sy = float(np.clip(cy + r * np.sin(theta), self.work_space_y[0] + 5, self.work_space_y[1] - 5))
-            model.start_position = [sx, sy, z]
+            sx, sy = sampled_xy[i]
+            model.start_position = [float(sx), float(sy), z]
 
     def _check_multi_uav_binding(self):
         if self.num_uavs <= 1:
@@ -1468,11 +1479,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             except TypeError:
                 collision_info = dynamic_model.client.simGetCollisionInfo()
             min_distance = self.min_distance_to_obstacles if self.num_uavs == 1 else self.min_distance_to_obstacles_all[i]
+            penetration_depth = getattr(collision_info, 'penetration_depth', 0.0)
+            collision_hit = collision_info.has_collided or penetration_depth > 1e-3
             if self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
                 # In pursuit, other UAVs can appear in depth view and trigger false crash by depth threshold.
-                crashed_now = collision_info.has_collided
+                # Keep collision/wall impact as crash.
+                crashed_now = collision_hit
             else:
-                crashed_now = collision_info.has_collided or min_distance < self.crash_distance
+                crashed_now = collision_hit or min_distance < self.crash_distance
             if crashed_now:
                 is_crashed = True
                 break
