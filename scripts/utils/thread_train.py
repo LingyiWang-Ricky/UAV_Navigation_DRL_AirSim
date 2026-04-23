@@ -173,6 +173,7 @@ class TrainingThread(QtCore.QThread):
                 'DRL', 'action_noise_sigma') * np.ones(n_actions)
             action_noise = NormalActionNoise(mean=np.zeros(n_actions),
                                              sigma=noise_sigma)
+            entropy_kwargs = self._get_sac_entropy_kwargs()
             model = SAC(
                 policy_base,
                 self.env,
@@ -187,7 +188,8 @@ class TrainingThread(QtCore.QThread):
                 gradient_steps=self.cfg.getint('DRL', 'gradient_steps'),
                 tensorboard_log=log_path,
                 seed=0,
-                verbose=2)
+                verbose=2,
+                **entropy_kwargs)
         elif algo == 'TD3':
             # The noise objects for TD3
             n_actions = self.env.action_space.shape[-1]
@@ -262,6 +264,7 @@ class TrainingThread(QtCore.QThread):
             n_actions = self.env.action_space.shape[-1]
             noise_sigma = self.cfg.getfloat('DRL', 'action_noise_sigma') * np.ones(n_actions)
             action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=noise_sigma)
+            entropy_kwargs = self._get_sac_entropy_kwargs()
             return SAC(
                 policy_base,
                 self.env,
@@ -276,7 +279,8 @@ class TrainingThread(QtCore.QThread):
                 gradient_steps=self.cfg.getint('DRL', 'gradient_steps'),
                 tensorboard_log=log_path,
                 seed=0,
-                verbose=2)
+                verbose=2,
+                **entropy_kwargs)
 
         rounds = self.cfg.getint('options', 'selfplay_rounds', fallback=10)
         steps_per_round = self.cfg.getint('options', 'selfplay_steps_per_round', fallback=10000)
@@ -306,6 +310,16 @@ class TrainingThread(QtCore.QThread):
 
         pursuer_model.save(model_path + '/model_pursuer_sb3')
         evader_model.save(model_path + '/model_evader_sb3')
+
+    def _get_sac_entropy_kwargs(self):
+        ent_coef = self.cfg.get('DRL', 'ent_coef', fallback='auto')
+        target_entropy_raw = self.cfg.get('DRL', 'target_entropy', fallback='auto')
+        try:
+            target_entropy = float(target_entropy_raw)
+        except ValueError:
+            target_entropy = target_entropy_raw
+        return dict(ent_coef=ent_coef, target_entropy=target_entropy)
+
 
 
 def main():

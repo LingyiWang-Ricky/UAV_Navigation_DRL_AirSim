@@ -564,18 +564,19 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
     def set_opponent_model(self, model):
         self.opponent_model = model
 
-    def _sample_or_predict_opponent_action(self):
+    def _sample_or_predict_opponent_action(self, expected_agent_count=1):
         action_dim = self.base_action_space.shape[0]
+        expected_size = expected_agent_count * action_dim
         if self.opponent_model is None or not hasattr(self, 'last_obs'):
-            return self.base_action_space.sample()
+            return np.concatenate([self.base_action_space.sample() for _ in range(expected_agent_count)], axis=0)
         try:
-            action, _ = self.opponent_model.predict(self.last_obs, deterministic=True)
+            action, _ = self.opponent_model.predict(self.last_obs, deterministic=False)
             action = np.asarray(action, dtype=np.float32).reshape(-1)
-            if action.size >= action_dim:
-                return action[:action_dim]
+            if action.size >= expected_size:
+                return action[:expected_size]
         except Exception:
             pass
-        return self.base_action_space.sample()
+        return np.concatenate([self.base_action_space.sample() for _ in range(expected_agent_count)], axis=0)
 
     def _compose_full_action_for_dual_policy(self, action):
         action = np.asarray(action, dtype=np.float32).reshape(-1)
@@ -586,14 +587,15 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             pursuer_action = action.reshape(len(self.pursuer_indices), action_dim)
             for k, idx in enumerate(self.pursuer_indices):
                 full_action[idx*action_dim:(idx+1)*action_dim] = pursuer_action[k]
-            evader_act = self._sample_or_predict_opponent_action()
-            full_action[self.evader_index*action_dim:(self.evader_index+1)*action_dim] = evader_act
+            evader_act = self._sample_or_predict_opponent_action(expected_agent_count=1)
+            full_action[self.evader_index*action_dim:(self.evader_index+1)*action_dim] = evader_act[:action_dim]
         elif self.control_role == 'evader':
             evader_act = action[:action_dim]
             full_action[self.evader_index*action_dim:(self.evader_index+1)*action_dim] = evader_act
-            for idx in self.pursuer_indices:
-                pursuer_act = self._sample_or_predict_opponent_action()
-                full_action[idx*action_dim:(idx+1)*action_dim] = pursuer_act
+            pursuer_actions = self._sample_or_predict_opponent_action(expected_agent_count=len(self.pursuer_indices))
+            pursuer_actions = pursuer_actions.reshape(len(self.pursuer_indices), action_dim)
+            for k, idx in enumerate(self.pursuer_indices):
+                full_action[idx*action_dim:(idx+1)*action_dim] = pursuer_actions[k]
         else:
             full_action = action
 
@@ -647,8 +649,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         caught = any(d <= self.catch_distance for d in curr_distances)
 
         pursuer_rewards = []
+        closest_dist = min(curr_distances)
+        near_catch_bonus = 0.0
+        if closest_dist < 1.5 * self.catch_distance:
+            near_catch_bonus = 2.0 * (1.5 * self.catch_distance - closest_dist) / max(self.catch_distance, 1e-3)
+
         for prev_d, curr_d in zip(prev_distances, curr_distances):
-            r = 3.0 * (prev_d - curr_d)
+            # dense chase shaping + urgency penalty
+            r = 3.0 * (prev_d - curr_d) - 0.05 + near_catch_bonus
             if caught:
                 r += 30.0
             pursuer_rewards.append(r)
@@ -663,6 +671,17 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         self.last_pursuer_reward = float(np.mean(pursuer_rewards))
         self.last_evader_reward = float(evader_reward)
+
+        # terminal shaping to discourage collision-heavy policies
+        if done and not caught:
+            if self.is_crashed() or self.is_not_inside_workspace():
+                self.last_pursuer_reward -= 20.0
+                self.last_evader_reward -= 20.0
+            elif self.step_num >= self.max_episode_steps:
+                # timeout means evader survived
+                self.last_pursuer_reward -= 5.0
+                self.last_evader_reward += 10.0
+
         # single scalar for centralized policy / fallback
         return float(self.last_pursuer_reward + self.last_evader_reward)
 
