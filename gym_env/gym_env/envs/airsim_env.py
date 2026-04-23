@@ -336,7 +336,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
     def reset(self):
         # reset state (with retry for invalid spawn states)
-        max_reset_retries = 6
+        max_reset_retries = 12
         reset_ok = False
         for attempt in range(max_reset_retries):
             if self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
