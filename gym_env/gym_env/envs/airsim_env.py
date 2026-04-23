@@ -336,6 +336,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
     def reset(self):
         # reset state
+        if self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
+            self._randomize_pursuit_start_positions()
+
         if self.dynamic_name == 'Multirotor':
             # reset AirSim world only once to avoid repeated global resets when using multiple UAVs
             self.client.reset()
@@ -363,10 +366,6 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self._update_pursuit_goals()
             self._update_pursuit_distance_cache()
 
-        if self.task_type == 'pursuit_2v1':
-            self._update_pursuit_goals()
-            self._update_pursuit_distance_cache()
-
         obs = self.get_obs()
 
         if self.num_uavs > 1:
@@ -374,6 +373,24 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         self.last_obs = obs
         return obs
+
+    def _randomize_pursuit_start_positions(self):
+        """Randomize episode starts for pursuit task to avoid overfitting fixed spawns."""
+        if self.num_uavs <= 1:
+            return
+
+        margin = 25.0
+        cx = np.random.uniform(self.work_space_x[0] + margin, self.work_space_x[1] - margin)
+        cy = np.random.uniform(self.work_space_y[0] + margin, self.work_space_y[1] - margin)
+        z = float(self.dynamic_models[0].start_position[2]) if len(self.dynamic_models[0].start_position) > 2 else 5.0
+
+        # distribute UAVs around random center
+        for i, model in enumerate(self.dynamic_models):
+            theta = np.random.uniform(-np.pi, np.pi)
+            r = self.uav_start_separation * (0.8 + 0.4 * np.random.rand()) * i
+            sx = float(np.clip(cx + r * np.cos(theta), self.work_space_x[0] + 5, self.work_space_x[1] - 5))
+            sy = float(np.clip(cy + r * np.sin(theta), self.work_space_y[0] + 5, self.work_space_y[1] - 5))
+            model.start_position = [sx, sy, z]
 
     def _check_multi_uav_binding(self):
         if self.num_uavs <= 1:
@@ -636,12 +653,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if norm < 1e-3:
             away_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
             norm = 1.0
-        away_dir = away_vec / norm
-        escape_goal = evader_pos + away_dir * 40.0
-        escape_goal[0] = np.clip(escape_goal[0], self.work_space_x[0], self.work_space_x[1])
-        escape_goal[1] = np.clip(escape_goal[1], self.work_space_y[0], self.work_space_y[1])
-        escape_goal[2] = np.clip(evader_pos[2], self.work_space_z[0], self.work_space_z[1])
-        self.dynamic_models[self.evader_index].goal_position = escape_goal.tolist()
+        # For evader policy, use pursuer centroid as dynamic reference so state features
+        # directly encode threat geometry (distance/yaw to pursuers).
+        evader_goal = np.array([
+            np.clip(pursuer_center[0], self.work_space_x[0], self.work_space_x[1]),
+            np.clip(pursuer_center[1], self.work_space_y[0], self.work_space_y[1]),
+            np.clip(evader_pos[2], self.work_space_z[0], self.work_space_z[1])
+        ], dtype=np.float32)
+        self.dynamic_models[self.evader_index].goal_position = evader_goal.tolist()
 
     def _get_pursuit_distances(self):
         evader_pos = np.asarray(self.dynamic_models[self.evader_index].get_position(), dtype=np.float32)
@@ -1449,7 +1468,12 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             except TypeError:
                 collision_info = dynamic_model.client.simGetCollisionInfo()
             min_distance = self.min_distance_to_obstacles if self.num_uavs == 1 else self.min_distance_to_obstacles_all[i]
-            if collision_info.has_collided or min_distance < self.crash_distance:
+            if self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
+                # In pursuit, other UAVs can appear in depth view and trigger false crash by depth threshold.
+                crashed_now = collision_info.has_collided
+            else:
+                crashed_now = collision_info.has_collided or min_distance < self.crash_distance
+            if crashed_now:
                 is_crashed = True
                 break
 
@@ -1496,9 +1520,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             'is_crash': info.get('is_crash'),
             'is_not_in_workspace': info.get('is_not_in_workspace')
         }
-        print('[EP-SUMMARY]', summary)
-        if self.num_uavs > 1 and 'uav_action_position_map' in info:
-            print('[EP-SUMMARY][FinalPose]', info['uav_action_position_map'])
+        avg_rewards = summary['avg_uav_rewards']
+        reward_msg = ' '.join([f"UAV{i+1}_ep_avg_reward={avg_rewards[i]:.4f}" for i in range(len(avg_rewards))])
+        print(f"EP {summary['episode']} done | steps={summary['steps']} total_reward={summary['episode_reward']:.4f} "
+              f"success={summary['is_success']} crash={summary['is_crash']} out={summary['is_not_in_workspace']} | {reward_msg}")
 
     def print_train_info_airsim(self, action, obs, reward, info):
         # if self.perception_type == 'split' or self.perception_type == 'lgmd':
