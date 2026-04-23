@@ -363,6 +363,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self._update_pursuit_goals()
             self._update_pursuit_distance_cache()
 
+        if self.task_type == 'pursuit_2v1':
+            self._update_pursuit_goals()
+            self._update_pursuit_distance_cache()
+
         obs = self.get_obs()
 
         if self.num_uavs > 1:
@@ -1428,6 +1432,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 in_desired_pose = False
                 break
         self._active_uav_idx = None
+        self._resolve_uav_names_with_airsim()
 
         return in_desired_pose
 
@@ -1520,6 +1525,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             action_position_map = info.get('uav_action_position_map', None)
             if action_position_map is not None:
                 self.client.simPrintLogMessage('UAV Action-Pos: ', str(action_position_map))
+                # Also print to Python console for easier debugging outside AirSim HUD.
+                print(f"[Console][EP {self.episode_num} STEP {self.step_num}] UAV Action-Pos: {action_position_map}")
         self.client.simPrintLogMessage(
             'Feature_norm: ', str(self.dynamic_model.state_norm))
         self.client.simPrintLogMessage(
