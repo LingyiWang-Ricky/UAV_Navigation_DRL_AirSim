@@ -1,5 +1,16 @@
 from .custom_policy_sb3 import CNN_FC, CNN_GAP, CNN_GAP_BN, No_CNN, CNN_MobileNet, CNN_GAP_new
 import datetime
+import os
+import sys
+from pathlib import Path
+
+# Ensure we import the repository-local gym_env package (./gym_env/gym_env)
+# instead of an older site-packages installation.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+LOCAL_GYM_ENV_PARENT = REPO_ROOT / 'gym_env'
+if LOCAL_GYM_ENV_PARENT.exists() and str(LOCAL_GYM_ENV_PARENT) not in sys.path:
+    sys.path.insert(0, str(LOCAL_GYM_ENV_PARENT))
+
 import gym
 import gym_env
 import numpy as np
@@ -12,8 +23,7 @@ import argparse
 import ast
 from configparser import ConfigParser
 import torch as th
-import os
-import sys
+
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.dirname(CURRENT_DIR))
 
@@ -67,6 +77,7 @@ class TrainingThread(QtCore.QThread):
 
         # Initialize env config in worker thread (may connect to AirSim)
         self.env.set_config(self.cfg)
+        dual_policy = self.cfg.getboolean('options', 'dual_policy', fallback=False)
 
         # wandb
         if self.cfg.getboolean('options', 'use_wandb'):
@@ -138,6 +149,11 @@ class TrainingThread(QtCore.QThread):
         net_arch_list = ast.literal_eval(self.cfg.get("options", "net_arch"))
         policy_kwargs['net_arch'] = net_arch_list
 
+        if dual_policy and self.cfg.get('options', 'task_type', fallback='goal_nav') == 'pursuit_2v1':
+            self.train_dual_policy(policy_base, policy_kwargs, log_path, model_path)
+            print('dual-policy self-play training finished')
+            return
+
         #! ---------------------------------algorithm selection-------------------------------------
         algo = self.cfg.get('options', 'algo')
         print('algo: ', algo)
@@ -157,6 +173,7 @@ class TrainingThread(QtCore.QThread):
                 'DRL', 'action_noise_sigma') * np.ones(n_actions)
             action_noise = NormalActionNoise(mean=np.zeros(n_actions),
                                              sigma=noise_sigma)
+            entropy_kwargs = self._get_sac_entropy_kwargs()
             model = SAC(
                 policy_base,
                 self.env,
@@ -171,7 +188,8 @@ class TrainingThread(QtCore.QThread):
                 gradient_steps=self.cfg.getint('DRL', 'gradient_steps'),
                 tensorboard_log=log_path,
                 seed=0,
-                verbose=2)
+                verbose=2,
+                **entropy_kwargs)
         elif algo == 'TD3':
             # The noise objects for TD3
             n_actions = self.env.action_space.shape[-1]
@@ -234,6 +252,74 @@ class TrainingThread(QtCore.QThread):
 
         print('training finished')
         print('model saved to: {}'.format(model_path))
+
+
+    def train_dual_policy(self, policy_base, policy_kwargs, log_path, model_path):
+        """Alternating self-play training for pursuer and evader policies."""
+        algo = self.cfg.get('options', 'algo')
+        if algo != 'SAC':
+            raise ValueError('dual_policy currently supports SAC only')
+
+        def build_sac_model():
+            n_actions = self.env.action_space.shape[-1]
+            noise_sigma = self.cfg.getfloat('DRL', 'action_noise_sigma') * np.ones(n_actions)
+            action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=noise_sigma)
+            entropy_kwargs = self._get_sac_entropy_kwargs()
+            return SAC(
+                policy_base,
+                self.env,
+                action_noise=action_noise,
+                policy_kwargs=policy_kwargs,
+                buffer_size=self.cfg.getint('DRL', 'buffer_size'),
+                gamma=self.cfg.getfloat('DRL', 'gamma'),
+                learning_starts=self.cfg.getint('DRL', 'learning_starts'),
+                learning_rate=self.cfg.getfloat('DRL', 'learning_rate'),
+                batch_size=self.cfg.getint('DRL', 'batch_size'),
+                train_freq=(self.cfg.getint('DRL', 'train_freq'), 'step'),
+                gradient_steps=self.cfg.getint('DRL', 'gradient_steps'),
+                tensorboard_log=log_path,
+                seed=0,
+                verbose=2,
+                **entropy_kwargs)
+
+        rounds = self.cfg.getint('options', 'selfplay_rounds', fallback=10)
+        steps_per_round = self.cfg.getint('options', 'selfplay_steps_per_round', fallback=10000)
+
+        print(f'dual-policy self-play -> rounds={rounds}, steps_per_round={steps_per_round}')
+
+        self.env.set_control_role('pursuer')
+        self.env.set_opponent_model(None)
+        pursuer_model = build_sac_model()
+
+        self.env.set_control_role('evader')
+        self.env.set_opponent_model(pursuer_model)
+        evader_model = build_sac_model()
+
+        for r in range(rounds):
+            print(f'========== self-play round {r+1}/{rounds} (pursuer) =========')
+            self.env.set_control_role('pursuer')
+            self.env.set_opponent_model(evader_model)
+            pursuer_model.set_env(self.env)
+            pursuer_model.learn(steps_per_round, reset_num_timesteps=False)
+
+            print(f'========== self-play round {r+1}/{rounds} (evader) =========')
+            self.env.set_control_role('evader')
+            self.env.set_opponent_model(pursuer_model)
+            evader_model.set_env(self.env)
+            evader_model.learn(steps_per_round, reset_num_timesteps=False)
+
+        pursuer_model.save(model_path + '/model_pursuer_sb3')
+        evader_model.save(model_path + '/model_evader_sb3')
+
+    def _get_sac_entropy_kwargs(self):
+        ent_coef = self.cfg.get('DRL', 'ent_coef', fallback='auto')
+        target_entropy_raw = self.cfg.get('DRL', 'target_entropy', fallback='auto')
+        try:
+            target_entropy = float(target_entropy_raw)
+        except ValueError:
+            target_entropy = target_entropy_raw
+        return dict(ent_coef=ent_coef, target_entropy=target_entropy)
+
 
 
 def main():
