@@ -57,6 +57,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.pursuit_safe_depth_m = cfg.getfloat('options', 'pursuit_safe_depth_m', fallback=8.0)
         self.pursuit_boundary_penalty_weight = cfg.getfloat('options', 'pursuit_boundary_penalty_weight', fallback=0.6)
         self.pursuit_boundary_safe_margin = cfg.getfloat('options', 'pursuit_boundary_safe_margin', fallback=8.0)
+        self.pursuit_out_penalty = cfg.getfloat('options', 'pursuit_out_penalty', fallback=300.0)
+        self.pursuit_use_visibility_reward_gate = cfg.getboolean('options', 'pursuit_use_visibility_reward_gate', fallback=True)
+        self.pursuit_visibility_half_fov_deg = cfg.getfloat('options', 'pursuit_visibility_half_fov_deg', fallback=55.0)
         self.pursuit_safety_shield = cfg.getboolean('options', 'pursuit_safety_shield', fallback=True)
         self.pursuit_shield_depth_m = cfg.getfloat('options', 'pursuit_shield_depth_m', fallback=4.5)
         self.pursuit_shield_min_scale = cfg.getfloat('options', 'pursuit_shield_min_scale', fallback=0.35)
@@ -793,9 +796,12 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if closest_dist < 1.5 * self.catch_distance:
             near_catch_bonus = 2.0 * (1.5 * self.catch_distance - closest_dist) / max(self.catch_distance, 1e-3)
 
-        for prev_d, curr_d in zip(prev_distances, curr_distances):
+        for idx_local, (prev_d, curr_d) in enumerate(zip(prev_distances, curr_distances)):
             # dense chase shaping + urgency penalty
-            r = 3.0 * (prev_d - curr_d) - 0.05 + near_catch_bonus + coop_bonus - overlap_penalty
+            pursuer_idx = self.pursuer_indices[idx_local] if idx_local < len(self.pursuer_indices) else idx_local
+            vis = self._get_pursuer_target_visibility(pursuer_idx)
+            progress_reward = 3.0 * (prev_d - curr_d)
+            r = progress_reward * (0.25 + 0.75 * vis) - 0.05 + near_catch_bonus * vis + coop_bonus - overlap_penalty
             if caught:
                 r += 200.0
             pursuer_rewards.append(r)
@@ -855,7 +861,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         # terminal shaping to discourage collision-heavy policies
         if done and not caught:
-            if self.is_crashed() or self.is_not_inside_workspace():
+            if self.is_not_inside_workspace():
+                self.last_pursuer_reward -= self.pursuit_out_penalty
+                self.last_evader_reward -= self.pursuit_out_penalty
+            elif self.is_crashed():
                 self.last_pursuer_reward -= 40.0
                 self.last_evader_reward -= 40.0
             elif self.step_num >= self.max_episode_steps:
@@ -894,6 +903,17 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         scale = float(max(self.pursuit_shield_min_scale, ratio))
         return np.asarray(action_i, dtype=np.float32) * scale
+
+    def _get_pursuer_target_visibility(self, pursuer_idx):
+        """Estimate whether target is in front of pursuer by yaw-error-to-goal."""
+        if not self.pursuit_use_visibility_reward_gate:
+            return 1.0
+        try:
+            yaw_error_deg = abs(float(self.dynamic_models[pursuer_idx].state_raw[2]))
+            vis = 1.0 - np.clip(yaw_error_deg / max(self.pursuit_visibility_half_fov_deg, 1e-3), 0.0, 1.0)
+            return float(vis)
+        except Exception:
+            return 1.0
 
     def get_uav_action_position_map(self, action_split_list=None, position_list=None):
         if self.num_uavs <= 1:
