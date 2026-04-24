@@ -366,7 +366,11 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if not reset_ok and self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
             print('[Warning] reset retries exhausted; continuing with current spawn state.')
 
-        self.episode_num += 1
+        # Count a new episode only when this is the very first reset, or when the
+        # previous episode actually advanced (step/reward). This avoids bumping
+        # episode index on abnormal immediate-termination/reset loops.
+        if self.episode_num == 0 or self.step_num > 0 or abs(self.cumulated_episode_reward) > 1e-6:
+            self.episode_num += 1
         self.step_num = 0
         self.cumulated_episode_reward = 0
         self.goal_distance_list = []
@@ -518,11 +522,12 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             'is_success': done_flags.get('is_success', self.is_in_desired_pose()),
             'is_crash': done_flags.get('is_crash', self.is_crashed()),
             'is_not_in_workspace': done_flags.get('is_not_in_workspace', self.is_not_inside_workspace()),
+            'is_timeout': done_flags.get('is_timeout', False),
             'step_num': self.step_num
         }
         if done and self.step_num == 0 and (not info['is_success']) and (not info['is_crash']) and (not info['is_not_in_workspace']):
             # Guard against occasional inconsistent done=True without any terminal condition.
-            print('[Warning] done=True at step 0 without terminal flag. Ignore this done and continue episode.')
+            print(f"[Warning] done=True at step 0 without terminal flag (timeout={info['is_timeout']}, max_episode_steps={self.max_episode_steps}). Ignore this done and continue episode.")
             done = False
         if self.num_uavs > 1:
             info['uav_action_position_map'] = self.get_uav_action_position_map(action_split_list, position_ue4)
@@ -1532,7 +1537,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         is_not_inside_workspace_now = bool(self.is_not_inside_workspace())
         has_reached_des_pose = bool(self.is_in_desired_pose())
         too_close_to_obstable = bool(self.is_crashed())
-        timeout = bool(self.step_num >= self.max_episode_steps)
+        timeout = bool(self.step_num > 0 and self.step_num >= max(int(self.max_episode_steps), 1))
 
         self.last_done_flags = {
             'is_success': has_reached_des_pose,
@@ -1653,12 +1658,13 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             'episode_reward': float(self.cumulated_episode_reward),
             'is_success': info.get('is_success'),
             'is_crash': info.get('is_crash'),
-            'is_not_in_workspace': info.get('is_not_in_workspace')
+            'is_not_in_workspace': info.get('is_not_in_workspace'),
+            'is_timeout': info.get('is_timeout')
         }
         avg_rewards = summary['avg_uav_rewards']
         reward_msg = ' '.join([f"UAV{i+1}_ep_avg_reward={avg_rewards[i]:.4f}" for i in range(len(avg_rewards))])
         print(f"EP {summary['episode']} done | steps={summary['steps']} total_reward={summary['episode_reward']:.4f} "
-              f"success={summary['is_success']} crash={summary['is_crash']} out={summary['is_not_in_workspace']} | {reward_msg}")
+              f"success={summary['is_success']} crash={summary['is_crash']} out={summary['is_not_in_workspace']} timeout={summary['is_timeout']} | {reward_msg}")
 
     def print_train_info_airsim(self, action, obs, reward, info):
         # if self.perception_type == 'split' or self.perception_type == 'lgmd':
