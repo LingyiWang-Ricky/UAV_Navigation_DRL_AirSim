@@ -55,6 +55,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.catch_distance = cfg.getfloat('options', 'catch_distance', fallback=5.0)
         self.pursuit_obstacle_penalty_weight = cfg.getfloat('options', 'pursuit_obstacle_penalty_weight', fallback=0.3)
         self.pursuit_safe_depth_m = cfg.getfloat('options', 'pursuit_safe_depth_m', fallback=8.0)
+        self.pursuit_safety_shield = cfg.getboolean('options', 'pursuit_safety_shield', fallback=True)
+        self.pursuit_shield_depth_m = cfg.getfloat('options', 'pursuit_shield_depth_m', fallback=4.5)
+        self.pursuit_shield_min_scale = cfg.getfloat('options', 'pursuit_shield_min_scale', fallback=0.35)
         self.dual_policy = cfg.getboolean('options', 'dual_policy', fallback=False)
         self.control_role = cfg.get('options', 'control_role', fallback='all')
         self.opponent_model = None
@@ -489,6 +492,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             position_ue4 = []
             for i, dynamic_model in enumerate(self.dynamic_models):
                 action_i = action_split_list[i]
+                action_i = self._apply_pursuit_safety_shield(action_i, i)
                 dynamic_model.set_action(action_i)
                 position_ue4.append(dynamic_model.get_position())
             self.trajectory_list.append(position_ue4)
@@ -830,8 +834,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         # terminal shaping to discourage collision-heavy policies
         if done and not caught:
             if self.is_crashed() or self.is_not_inside_workspace():
-                self.last_pursuer_reward -= 20.0
-                self.last_evader_reward -= 20.0
+                self.last_pursuer_reward -= 40.0
+                self.last_evader_reward -= 40.0
             elif self.step_num >= self.max_episode_steps:
                 # timeout means evader survived
                 self.last_pursuer_reward -= 5.0
@@ -839,6 +843,23 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         # single scalar for centralized policy / fallback
         return float(self.last_pursuer_reward + self.last_evader_reward)
+
+    def _apply_pursuit_safety_shield(self, action_i, uav_idx):
+        """Runtime safety shield: reduce command magnitude near obstacles."""
+        if self.task_type != 'pursuit_2v1' or self.num_uavs <= 1 or (not self.pursuit_safety_shield):
+            return action_i
+
+        depth_list = getattr(self, 'min_distance_to_obstacles_all', None)
+        if depth_list is None or len(depth_list) <= uav_idx:
+            return action_i
+
+        min_depth = float(depth_list[uav_idx])
+        if min_depth >= self.pursuit_shield_depth_m:
+            return action_i
+
+        ratio = np.clip(min_depth / max(self.pursuit_shield_depth_m, 1e-3), 0.0, 1.0)
+        scale = float(max(self.pursuit_shield_min_scale, ratio))
+        return np.asarray(action_i, dtype=np.float32) * scale
 
     def get_uav_action_position_map(self, action_split_list=None, position_list=None):
         if self.num_uavs <= 1:
