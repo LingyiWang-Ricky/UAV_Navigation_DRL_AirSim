@@ -234,6 +234,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.screen_width = cfg.getint('environment', 'screen_width')
 
         self.trajectory_list = []
+        self.last_done_flags = {}
 
         # observation space vector or image
         if self.perception_type == 'vector' or self.perception_type == 'lgmd':
@@ -512,12 +513,17 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         obs = self.get_obs()
         self.last_obs = obs
         done = self.is_done()
+        done_flags = getattr(self, 'last_done_flags', {})
         info = {
-            'is_success': self.is_in_desired_pose(),
-            'is_crash': self.is_crashed(),
-            'is_not_in_workspace': self.is_not_inside_workspace(),
+            'is_success': done_flags.get('is_success', self.is_in_desired_pose()),
+            'is_crash': done_flags.get('is_crash', self.is_crashed()),
+            'is_not_in_workspace': done_flags.get('is_not_in_workspace', self.is_not_inside_workspace()),
             'step_num': self.step_num
         }
+        if done and self.step_num == 0 and (not info['is_success']) and (not info['is_crash']) and (not info['is_not_in_workspace']):
+            # Guard against occasional inconsistent done=True without any terminal condition.
+            print('[Warning] done=True at step 0 without terminal flag. Ignore this done and continue episode.')
+            done = False
         if self.num_uavs > 1:
             info['uav_action_position_map'] = self.get_uav_action_position_map(action_split_list, position_ue4)
         if done:
@@ -1523,19 +1529,21 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 # ! ------------------ is done-----------------------------------------------
 
     def is_done(self):
-        episode_done = False
+        is_not_inside_workspace_now = bool(self.is_not_inside_workspace())
+        has_reached_des_pose = bool(self.is_in_desired_pose())
+        too_close_to_obstable = bool(self.is_crashed())
+        timeout = bool(self.step_num >= self.max_episode_steps)
 
-        is_not_inside_workspace_now = self.is_not_inside_workspace()
-        has_reached_des_pose = self.is_in_desired_pose()
-        too_close_to_obstable = self.is_crashed()
+        self.last_done_flags = {
+            'is_success': has_reached_des_pose,
+            'is_crash': too_close_to_obstable,
+            'is_not_in_workspace': is_not_inside_workspace_now,
+            'is_timeout': timeout
+        }
 
         # We see if we are outside the Learning Space
-        episode_done = is_not_inside_workspace_now or\
-            has_reached_des_pose or\
-            too_close_to_obstable or\
-            self.step_num >= self.max_episode_steps
-
-        return episode_done
+        episode_done = is_not_inside_workspace_now or has_reached_des_pose or too_close_to_obstable or timeout
+        return bool(episode_done)
 
     def is_not_inside_workspace(self):
         """
