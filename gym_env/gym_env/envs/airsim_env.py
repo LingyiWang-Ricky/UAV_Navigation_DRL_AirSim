@@ -53,6 +53,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.task_type = cfg.get('options', 'task_type', fallback='goal_nav')
         self.uav_start_separation = cfg.getfloat('options', 'uav_start_separation', fallback=10.0)
         self.catch_distance = cfg.getfloat('options', 'catch_distance', fallback=5.0)
+        self.pursuit_obstacle_penalty_weight = cfg.getfloat('options', 'pursuit_obstacle_penalty_weight', fallback=0.3)
+        self.pursuit_safe_depth_m = cfg.getfloat('options', 'pursuit_safe_depth_m', fallback=8.0)
         self.dual_policy = cfg.getboolean('options', 'dual_policy', fallback=False)
         self.control_role = cfg.get('options', 'control_role', fallback='all')
         self.opponent_model = None
@@ -792,9 +794,31 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 r += 100.0
             pursuer_rewards.append(r)
 
+        # independent obstacle-avoidance shaping (dense): penalize near-obstacle motion
+        # using per-UAV depth minima gathered in get_obs().
+        depth_list = getattr(self, 'min_distance_to_obstacles_all', [])
+        pursuer_obs_penalties = []
+        for pursuer_idx in self.pursuer_indices:
+            min_depth = depth_list[pursuer_idx] if len(depth_list) > pursuer_idx else self.pursuit_safe_depth_m
+            if min_depth < self.pursuit_safe_depth_m:
+                denom = max(self.pursuit_safe_depth_m - self.crash_distance, 1e-3)
+                p_obs = 1.0 - np.clip((min_depth - self.crash_distance) / denom, 0.0, 1.0)
+            else:
+                p_obs = 0.0
+            pursuer_obs_penalties.append(float(p_obs))
+        if len(pursuer_obs_penalties) > 0:
+            pursuer_obs_penalty = float(np.mean(pursuer_obs_penalties))
+            pursuer_rewards = [r - self.pursuit_obstacle_penalty_weight * pursuer_obs_penalty for r in pursuer_rewards]
+
         prev_mean = float(np.mean(prev_distances))
         curr_mean = float(np.mean(curr_distances))
         evader_reward = 3.0 * (curr_mean - prev_mean) + 0.05
+        evader_min_depth = depth_list[self.evader_index] if len(depth_list) > self.evader_index else self.pursuit_safe_depth_m
+        if evader_min_depth < self.pursuit_safe_depth_m:
+            evader_obs_penalty = 1.0 - np.clip(
+                (evader_min_depth - self.crash_distance) / max(self.pursuit_safe_depth_m - self.crash_distance, 1e-3),
+                0.0, 1.0)
+            evader_reward -= self.pursuit_obstacle_penalty_weight * float(evader_obs_penalty)
         if caught:
             evader_reward -= 100.0
 
