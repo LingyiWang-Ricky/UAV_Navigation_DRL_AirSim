@@ -55,6 +55,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.catch_distance = cfg.getfloat('options', 'catch_distance', fallback=5.0)
         self.pursuit_obstacle_penalty_weight = cfg.getfloat('options', 'pursuit_obstacle_penalty_weight', fallback=0.3)
         self.pursuit_safe_depth_m = cfg.getfloat('options', 'pursuit_safe_depth_m', fallback=8.0)
+        self.pursuit_boundary_penalty_weight = cfg.getfloat('options', 'pursuit_boundary_penalty_weight', fallback=0.6)
+        self.pursuit_boundary_safe_margin = cfg.getfloat('options', 'pursuit_boundary_safe_margin', fallback=8.0)
         self.pursuit_safety_shield = cfg.getboolean('options', 'pursuit_safety_shield', fallback=True)
         self.pursuit_shield_depth_m = cfg.getfloat('options', 'pursuit_shield_depth_m', fallback=4.5)
         self.pursuit_shield_min_scale = cfg.getfloat('options', 'pursuit_shield_min_scale', fallback=0.35)
@@ -795,7 +797,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             # dense chase shaping + urgency penalty
             r = 3.0 * (prev_d - curr_d) - 0.05 + near_catch_bonus + coop_bonus - overlap_penalty
             if caught:
-                r += 100.0
+                r += 200.0
             pursuer_rewards.append(r)
 
         # independent obstacle-avoidance shaping (dense): penalize near-obstacle motion
@@ -814,6 +816,24 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             pursuer_obs_penalty = float(np.mean(pursuer_obs_penalties))
             pursuer_rewards = [r - self.pursuit_obstacle_penalty_weight * pursuer_obs_penalty for r in pursuer_rewards]
 
+        # boundary-awareness shaping: penalize being too close to workspace boundary.
+        def boundary_penalty(pos):
+            margin_x = min(pos[0] - self.work_space_x[0], self.work_space_x[1] - pos[0])
+            margin_y = min(pos[1] - self.work_space_y[0], self.work_space_y[1] - pos[1])
+            margin_z = min(pos[2] - self.work_space_z[0], self.work_space_z[1] - pos[2])
+            min_margin = min(margin_x, margin_y, margin_z)
+            if min_margin >= self.pursuit_boundary_safe_margin:
+                return 0.0
+            return float(1.0 - np.clip(min_margin / max(self.pursuit_boundary_safe_margin, 1e-3), 0.0, 1.0))
+
+        pursuer_boundary_penalties = []
+        for pursuer_idx in self.pursuer_indices:
+            pos = np.asarray(self.dynamic_models[pursuer_idx].get_position(), dtype=np.float32)
+            pursuer_boundary_penalties.append(boundary_penalty(pos))
+        if len(pursuer_boundary_penalties) > 0:
+            pursuer_boundary_penalty = float(np.mean(pursuer_boundary_penalties))
+            pursuer_rewards = [r - self.pursuit_boundary_penalty_weight * pursuer_boundary_penalty for r in pursuer_rewards]
+
         prev_mean = float(np.mean(prev_distances))
         curr_mean = float(np.mean(curr_distances))
         evader_reward = 3.0 * (curr_mean - prev_mean) + 0.05
@@ -823,8 +843,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 (evader_min_depth - self.crash_distance) / max(self.pursuit_safe_depth_m - self.crash_distance, 1e-3),
                 0.0, 1.0)
             evader_reward -= self.pursuit_obstacle_penalty_weight * float(evader_obs_penalty)
+        evader_pos = np.asarray(self.dynamic_models[self.evader_index].get_position(), dtype=np.float32)
+        evader_reward -= self.pursuit_boundary_penalty_weight * boundary_penalty(evader_pos)
         if caught:
-            evader_reward -= 100.0
+            evader_reward -= 200.0
 
         self.prev_pursuit_distances = curr_distances
 
@@ -854,10 +876,22 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             return action_i
 
         min_depth = float(depth_list[uav_idx])
-        if min_depth >= self.pursuit_shield_depth_m:
+        obstacle_ratio = 1.0 if min_depth >= self.pursuit_shield_depth_m else np.clip(
+            min_depth / max(self.pursuit_shield_depth_m, 1e-3), 0.0, 1.0)
+
+        # near boundary -> additional slowdown
+        pos = np.asarray(self.dynamic_models[uav_idx].get_position(), dtype=np.float32)
+        margin_x = min(pos[0] - self.work_space_x[0], self.work_space_x[1] - pos[0])
+        margin_y = min(pos[1] - self.work_space_y[0], self.work_space_y[1] - pos[1])
+        margin_z = min(pos[2] - self.work_space_z[0], self.work_space_z[1] - pos[2])
+        min_margin = min(margin_x, margin_y, margin_z)
+        boundary_ratio = 1.0 if min_margin >= self.pursuit_boundary_safe_margin else np.clip(
+            min_margin / max(self.pursuit_boundary_safe_margin, 1e-3), 0.0, 1.0)
+
+        ratio = float(min(obstacle_ratio, boundary_ratio))
+        if ratio >= 1.0:
             return action_i
 
-        ratio = np.clip(min_depth / max(self.pursuit_shield_depth_m, 1e-3), 0.0, 1.0)
         scale = float(max(self.pursuit_shield_min_scale, ratio))
         return np.asarray(action_i, dtype=np.float32) * scale
 
