@@ -216,6 +216,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.client = self.dynamic_model.client
         self.state_feature_length = self.dynamic_model.state_feature_length
         self.cnn_feature_length = self.cfg.getint('options', 'cnn_feature_num')
+        self.pursuit_extra_state_feature_length = 5 if (self.task_type == 'pursuit_2v1' and self.num_uavs > 1) else 0
 
         # training state
         self.episode_num = 0
@@ -238,7 +239,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if self.perception_type == 'vector' or self.perception_type == 'lgmd':
             self.observation_space = spaces.Box(low=0, high=1,
                                                 shape=(1,
-                                                       self.num_uavs * (self.cnn_feature_length + self.state_feature_length)),
+                                                       self.num_uavs * (self.cnn_feature_length + self.state_feature_length + self.pursuit_extra_state_feature_length)),
                                                 dtype=np.float32)
         else:
             self.observation_space = spaces.Box(low=0, high=255,
@@ -744,6 +745,29 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         prev_distances = self.prev_pursuit_distances
         caught = any(d <= self.catch_distance for d in curr_distances)
 
+        # cooperative shaping: encourage pursuers to form a wider encirclement
+        # around the evader instead of tailing in a straight line.
+        coop_bonus = 0.0
+        overlap_penalty = 0.0
+        if len(self.pursuer_indices) >= 2:
+            evader_pos = np.asarray(self.dynamic_models[self.evader_index].get_position(), dtype=np.float32)
+            pursuer_positions = [np.asarray(self.dynamic_models[idx].get_position(), dtype=np.float32) for idx in self.pursuer_indices]
+            pursuer_pair_dist = float(np.linalg.norm(pursuer_positions[0] - pursuer_positions[1]))
+            if pursuer_pair_dist < max(0.8 * self.catch_distance, 3.0):
+                overlap_penalty = 1.0
+
+            v1 = pursuer_positions[0] - evader_pos
+            v2 = pursuer_positions[1] - evader_pos
+            n1 = np.linalg.norm(v1)
+            n2 = np.linalg.norm(v2)
+            if n1 > 1e-6 and n2 > 1e-6:
+                cos_sim = float(np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0))
+                angle = float(np.arccos(cos_sim))
+                # 40deg+ starts getting reward, larger spread receives stronger bonus.
+                coop_bonus = np.clip((angle - np.deg2rad(40.0)) / np.deg2rad(120.0), 0.0, 1.0) * 2.0
+                if n1 < 2.5 * self.catch_distance and n2 < 2.5 * self.catch_distance:
+                    coop_bonus += 1.0
+
         pursuer_rewards = []
         closest_dist = min(curr_distances)
         near_catch_bonus = 0.0
@@ -752,7 +776,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         for prev_d, curr_d in zip(prev_distances, curr_distances):
             # dense chase shaping + urgency penalty
-            r = 3.0 * (prev_d - curr_d) - 0.05 + near_catch_bonus
+            r = 3.0 * (prev_d - curr_d) - 0.05 + near_catch_bonus + coop_bonus - overlap_penalty
             if caught:
                 r += 50.0
             pursuer_rewards.append(r)
@@ -806,9 +830,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if self.num_uavs > 1:
             self.min_distance_to_obstacles_all = []
             if self.perception_type == 'vector':
-                obs_all = [self.get_obs_vector_single(dynamic_model) for dynamic_model in self.dynamic_models]
+                obs_all = [self.get_obs_vector_single(dynamic_model, i) for i, dynamic_model in enumerate(self.dynamic_models)]
                 return np.concatenate(obs_all, axis=1)
-            obs_all = [self.get_obs_image_single(dynamic_model) for dynamic_model in self.dynamic_models]
+            obs_all = [self.get_obs_image_single(dynamic_model, i) for i, dynamic_model in enumerate(self.dynamic_models)]
             return np.concatenate(obs_all, axis=2)
 
         if self.perception_type == 'vector':
@@ -820,7 +844,35 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         return obs
 
-    def get_obs_image_single(self, dynamic_model):
+    def _get_pursuit_role_feature(self, uav_idx):
+        """Extra role/target features so identical-looking UAVs remain distinguishable in pursuit."""
+        if self.task_type != 'pursuit_2v1' or self.num_uavs <= 1:
+            return np.zeros((0,), dtype=np.float32)
+
+        own_pos = np.asarray(self.dynamic_models[uav_idx].get_position(), dtype=np.float32)
+        is_evader = float(uav_idx == self.evader_index)
+        is_pursuer = 1.0 - is_evader
+
+        if is_evader > 0.5:
+            pursuer_positions = [np.asarray(self.dynamic_models[idx].get_position(), dtype=np.float32) for idx in self.pursuer_indices]
+            target_pos = np.mean(pursuer_positions, axis=0) if len(pursuer_positions) > 0 else own_pos
+        else:
+            target_pos = np.asarray(self.dynamic_models[self.evader_index].get_position(), dtype=np.float32)
+
+        delta = target_pos - own_pos
+        ws_span = np.array([
+            max(self.work_space_x[1] - self.work_space_x[0], 1.0),
+            max(self.work_space_y[1] - self.work_space_y[0], 1.0),
+            max(self.work_space_z[1] - self.work_space_z[0], 1.0),
+        ], dtype=np.float32)
+        delta_norm = np.clip(delta / ws_span, -1.0, 1.0)
+        delta_01 = 0.5 + 0.5 * delta_norm
+
+        return np.array([is_pursuer, is_evader, delta_01[0], delta_01[1], delta_01[2]], dtype=np.float32)
+
+    def get_obs_image_single(self, dynamic_model, uav_idx=None):
+        if uav_idx is None:
+            uav_idx = 0
         image = self.get_depth_image(client=dynamic_model.client, vehicle_name=getattr(dynamic_model, 'vehicle_name', ''))
         self.min_distance_to_obstacles_all.append(image.min())
         image_resize = cv2.resize(image, (self.screen_width,
@@ -831,15 +883,20 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         image_uint8 = image_scaled.astype(np.uint8)
 
         state_feature_array = np.zeros((self.screen_height, self.screen_width))
-        state_feature = dynamic_model._get_state_feature()
-        state_feature_array[0, 0:self.state_feature_length] = state_feature
+        state_feature = dynamic_model._get_state_feature().astype(np.float32)
+        extra_feature = self._get_pursuit_role_feature(uav_idx) * 255.0
+        state_feature = np.concatenate((state_feature, extra_feature), axis=0)
+        write_len = min(len(state_feature), self.screen_width)
+        state_feature_array[0, 0:write_len] = state_feature[0:write_len]
 
         image_with_state = np.array([image_uint8, state_feature_array])
         image_with_state = image_with_state.swapaxes(0, 2)
         image_with_state = image_with_state.swapaxes(0, 1)
         return image_with_state
 
-    def get_obs_vector_single(self, dynamic_model):
+    def get_obs_vector_single(self, dynamic_model, uav_idx=None):
+        if uav_idx is None:
+            uav_idx = 0
         image = self.get_depth_image(client=dynamic_model.client, vehicle_name=getattr(dynamic_model, 'vehicle_name', ''))
         self.min_distance_to_obstacles_all.append(image.min())
         image_scaled = np.clip(image, 0, self.max_depth_meters) / self.max_depth_meters * 255
@@ -859,7 +916,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 split_final.append(h_split_list[j].max())
 
         img_feature = np.array(split_final) / 255.0
-        state_feature = dynamic_model._get_state_feature() / 255
+        state_feature = dynamic_model._get_state_feature().astype(np.float32) / 255.0
+        extra_feature = self._get_pursuit_role_feature(uav_idx)
+        state_feature = np.concatenate((state_feature, extra_feature), axis=0)
         feature_all = np.concatenate((img_feature, state_feature), axis=0)
         feature_all = np.reshape(feature_all, (1, len(feature_all)))
         return feature_all
