@@ -778,14 +778,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             # dense chase shaping + urgency penalty
             r = 3.0 * (prev_d - curr_d) - 0.05 + near_catch_bonus + coop_bonus - overlap_penalty
             if caught:
-                r += 50.0
+                r += 100.0
             pursuer_rewards.append(r)
 
         prev_mean = float(np.mean(prev_distances))
         curr_mean = float(np.mean(curr_distances))
         evader_reward = 3.0 * (curr_mean - prev_mean) + 0.05
         if caught:
-            evader_reward -= 50.0
+            evader_reward -= 100.0
 
         self.prev_pursuit_distances = curr_distances
 
@@ -1589,10 +1589,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 collision_info = dynamic_model.client.simGetCollisionInfo()
             min_distance = self.min_distance_to_obstacles if self.num_uavs == 1 else self.min_distance_to_obstacles_all[i]
             penetration_depth = getattr(collision_info, 'penetration_depth', 0.0)
-            collision_hit = collision_info.has_collided or penetration_depth > 1e-3
+            collision_hit = collision_info.has_collided or penetration_depth > 0.02
             if self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
                 # In pursuit, other UAVs can appear in depth view and trigger false crash by depth threshold.
                 # Keep collision/wall impact as crash.
+                if self.step_num <= 1 and not collision_info.has_collided:
+                    # Right after reset AirSim can report tiny transient penetration values.
+                    # Avoid step-0 immediate episode termination on non-contact artifacts.
+                    collision_hit = False
                 crashed_now = collision_hit
             else:
                 crashed_now = collision_hit or min_distance < self.crash_distance
