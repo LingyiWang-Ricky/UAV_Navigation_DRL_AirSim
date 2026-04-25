@@ -212,6 +212,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         else:
             raise Exception("Invalid env_name!", self.env_name)
 
+        if cfg.has_option('environment', 'max_episode_steps'):
+            self.max_episode_steps = cfg.getint('environment', 'max_episode_steps')
+
         if self.num_uavs > 1:
             for i, dynamic_model in enumerate(self.dynamic_models[1:], start=1):
                 start_position = list(self.dynamic_model.start_position)
@@ -906,7 +909,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         action_arr *= scale
 
         # If too close to boundary, actively steer yaw back to workspace center.
-        if boundary_ratio < 0.8 and len(action_arr) >= 2:
+        if boundary_ratio < 0.6 and len(action_arr) >= 2:
             center_x = 0.5 * (self.work_space_x[0] + self.work_space_x[1])
             center_y = 0.5 * (self.work_space_y[0] + self.work_space_y[1])
             to_center = np.array([center_x - pos[0], center_y - pos[1]], dtype=np.float32)
@@ -919,10 +922,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 while yaw_error < -math.pi:
                     yaw_error += 2.0 * math.pi
                 turn_cmd = float(np.clip(yaw_error / (math.pi / 3.0), -1.0, 1.0))
-                action_arr[-1] = float(np.clip(0.6 * action_arr[-1] + 0.9 * turn_cmd, -1.0, 1.0))
+                action_arr[-1] = float(np.clip(0.8 * action_arr[-1] + 0.6 * turn_cmd, -1.0, 1.0))
 
             # reduce forward speed further near boundary
-            action_arr[0] = action_arr[0] * max(self.pursuit_shield_min_scale, boundary_ratio * 0.6)
+            action_arr[0] = action_arr[0] * max(self.pursuit_shield_min_scale, boundary_ratio * 0.85)
 
         return action_arr
 
