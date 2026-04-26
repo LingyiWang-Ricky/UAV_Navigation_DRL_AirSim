@@ -63,6 +63,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.pursuit_safety_shield = cfg.getboolean('options', 'pursuit_safety_shield', fallback=True)
         self.pursuit_shield_depth_m = cfg.getfloat('options', 'pursuit_shield_depth_m', fallback=4.5)
         self.pursuit_shield_min_scale = cfg.getfloat('options', 'pursuit_shield_min_scale', fallback=0.35)
+        self.pursuit_use_safe_mask = cfg.getboolean('options', 'pursuit_use_safe_mask', fallback=True)
+        self.pursuit_safe_mask_depth_m = cfg.getfloat('options', 'pursuit_safe_mask_depth_m', fallback=2.8)
+        self.pursuit_safe_mask_boundary_margin = cfg.getfloat('options', 'pursuit_safe_mask_boundary_margin', fallback=4.0)
         self.dual_policy = cfg.getboolean('options', 'dual_policy', fallback=False)
         self.control_role = cfg.get('options', 'control_role', fallback='all')
         self.opponent_model = None
@@ -907,6 +910,30 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         scale = float(max(self.pursuit_shield_min_scale, ratio))
         action_arr = np.asarray(action_i, dtype=np.float32).copy()
         action_arr *= scale
+
+        # Hard safe-mask near high-risk states (close obstacle or close boundary):
+        # clamp forward speed and force turning away from boundary/into safer region.
+        high_risk = (min_depth < self.pursuit_safe_mask_depth_m) or (min_margin < self.pursuit_safe_mask_boundary_margin)
+        if self.pursuit_use_safe_mask and high_risk and len(action_arr) >= 2:
+            # keep very small forward speed in risk zone
+            action_arr[0] = np.clip(action_arr[0], -0.05, 0.15)
+
+            # prefer turning toward workspace center when boundary is close
+            center_x = 0.5 * (self.work_space_x[0] + self.work_space_x[1])
+            center_y = 0.5 * (self.work_space_y[0] + self.work_space_y[1])
+            to_center = np.array([center_x - pos[0], center_y - pos[1]], dtype=np.float32)
+            if np.linalg.norm(to_center) > 1e-6:
+                desired_yaw = math.atan2(float(to_center[1]), float(to_center[0]))
+                current_yaw = float(self.dynamic_models[uav_idx].get_attitude()[2])
+                yaw_error = desired_yaw - current_yaw
+                while yaw_error > math.pi:
+                    yaw_error -= 2.0 * math.pi
+                while yaw_error < -math.pi:
+                    yaw_error += 2.0 * math.pi
+                turn_cmd = float(np.clip(yaw_error / (math.pi / 2.0), -1.0, 1.0))
+                action_arr[-1] = float(np.clip(0.2 * action_arr[-1] + 1.0 * turn_cmd, -1.0, 1.0))
+            else:
+                action_arr[-1] = float(np.sign(action_arr[-1]) if abs(action_arr[-1]) > 1e-6 else 1.0)
 
         # If too close to boundary, actively steer yaw back to workspace center.
         if boundary_ratio < 0.6 and len(action_arr) >= 2:
