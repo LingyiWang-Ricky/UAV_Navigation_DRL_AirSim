@@ -69,6 +69,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.pursuit_reset_min_depth_m = cfg.getfloat('options', 'pursuit_reset_min_depth_m', fallback=3.0)
         self.use_predictive_safety_filter = cfg.getboolean('options', 'use_predictive_safety_filter', fallback=True)
         self.safety_brake_margin = cfg.getfloat('options', 'safety_brake_margin', fallback=3.0)
+        self.pursuit_safety_override_penalty = cfg.getfloat('options', 'pursuit_safety_override_penalty', fallback=3.0)
+        self.pursuit_safe_separation_m = cfg.getfloat('options', 'pursuit_safe_separation_m', fallback=6.0)
         self.no_fly_zones = self._parse_no_fly_zones(cfg.get('options', 'no_fly_zones', fallback=''))
         self.dual_policy = cfg.getboolean('options', 'dual_policy', fallback=False)
         self.control_role = cfg.get('options', 'control_role', fallback='all')
@@ -373,6 +375,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 for dynamic_model in self.dynamic_models:
                     dynamic_model.reset()
 
+            self._run_post_reset_stabilization()
+
             if self.task_type != 'pursuit_2v1' or self.num_uavs <= 1:
                 reset_ok = True
                 break
@@ -402,6 +406,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.trajectory_list = []
         self.last_action_split_list = None
         self.last_position_list = None
+        self.last_safety_override_count = 0
         self.episode_uav_rewards = np.zeros(self.num_uavs, dtype=np.float32)
 
         if self.task_type == 'pursuit_2v1':
@@ -415,6 +420,21 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         self.last_obs = obs
         return obs
+
+    def _run_post_reset_stabilization(self):
+        """Let multirotors execute one zero-action step after reset to clear transient contacts."""
+        if self.dynamic_name not in ['Multirotor', 'SimpleMultirotor']:
+            return
+        try:
+            if hasattr(self, 'base_action_space'):
+                action_dim = int(self.base_action_space.shape[0])
+            else:
+                action_dim = 2
+            zero_action = np.zeros((action_dim,), dtype=np.float32)
+            for model in self.dynamic_models:
+                model.set_action(zero_action)
+        except Exception:
+            return
 
     def _randomize_pursuit_start_positions(self):
         """Randomize episode starts for pursuit task with wider spread and min-distance constraint."""
@@ -512,6 +532,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         else:
             action, action_split_list = self._split_multi_uav_action(action)
             position_ue4 = []
+            self.last_safety_override_count = 0
             for i, dynamic_model in enumerate(self.dynamic_models):
                 action_i = action_split_list[i]
                 action_i = self._apply_pursuit_safety_shield(action_i, i)
@@ -872,6 +893,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if caught:
             evader_reward -= 200.0
 
+        # Learning signal for safety filter usage:
+        # if runtime filter had to override action, penalize to push policy toward inherently safe outputs.
+        overrides = getattr(self, 'last_safety_override_count', 0)
+        if overrides > 0:
+            p_override = self.pursuit_safety_override_penalty * (float(overrides) / max(float(self.num_uavs), 1.0))
+            pursuer_rewards = [r - p_override for r in pursuer_rewards]
+            evader_reward -= p_override
+
         self.prev_pursuit_distances = curr_distances
 
         self.last_pursuer_reward = float(np.mean(pursuer_rewards))
@@ -925,10 +954,18 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         # Hard safe-mask near high-risk states (close obstacle or close boundary):
         # clamp forward speed and force turning away from boundary/into safer region.
-        high_risk = (min_depth < self.pursuit_safe_mask_depth_m) or (min_margin < self.pursuit_safe_mask_boundary_margin)
+        # refresh depth at current step for tighter hard-constraint checks
+        live_min_depth = min_depth
+        try:
+            depth_img = self.get_depth_image(client=model.client, vehicle_name=getattr(model, 'vehicle_name', ''))
+            live_min_depth = float(np.min(depth_img))
+        except Exception:
+            pass
+
+        high_risk = (live_min_depth < self.pursuit_safe_mask_depth_m) or (min_margin < self.pursuit_safe_mask_boundary_margin)
         if self.pursuit_use_safe_mask and high_risk and len(action_arr) >= 2:
             # keep very small forward speed in risk zone
-            action_arr[0] = np.clip(action_arr[0], -0.05, 0.15)
+            action_arr[0] = np.clip(action_arr[0], -0.1, 0.1)
 
             # prefer turning toward workspace center when boundary is close
             center_x = 0.5 * (self.work_space_x[0] + self.work_space_x[1])
@@ -1037,10 +1074,28 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         margin_y = min(pos[1] - self.work_space_y[0], self.work_space_y[1] - pos[1])
         near_boundary = min(margin_x, margin_y) < self.safety_brake_margin
 
-        if will_out or will_enter_no_fly or near_boundary:
-            center_x = 0.5 * (self.work_space_x[0] + self.work_space_x[1])
-            center_y = 0.5 * (self.work_space_y[0] + self.work_space_y[1])
-            desired_yaw = math.atan2(center_y - float(pos[1]), center_x - float(pos[0]))
+        # inter-UAV collision risk
+        nearest_peer_dist = 1e9
+        away_from_peer = None
+        for j, peer in enumerate(self.dynamic_models):
+            if j == uav_idx:
+                continue
+            peer_pos = np.asarray(peer.get_position(), dtype=np.float32)
+            diff = pos - peer_pos
+            d = float(np.linalg.norm(diff))
+            if d < nearest_peer_dist:
+                nearest_peer_dist = d
+                away_from_peer = diff
+        will_peer_collide = nearest_peer_dist < self.pursuit_safe_separation_m
+
+        if will_out or will_enter_no_fly or near_boundary or will_peer_collide:
+            self.last_safety_override_count = getattr(self, 'last_safety_override_count', 0) + 1
+            if will_peer_collide and away_from_peer is not None and np.linalg.norm(away_from_peer[:2]) > 1e-6:
+                desired_yaw = math.atan2(float(away_from_peer[1]), float(away_from_peer[0]))
+            else:
+                center_x = 0.5 * (self.work_space_x[0] + self.work_space_x[1])
+                center_y = 0.5 * (self.work_space_y[0] + self.work_space_y[1])
+                desired_yaw = math.atan2(center_y - float(pos[1]), center_x - float(pos[0]))
             yaw_error = desired_yaw - yaw
             while yaw_error > math.pi:
                 yaw_error -= 2.0 * math.pi
@@ -1049,7 +1104,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             turn_cmd = float(np.clip(yaw_error / (math.pi / 2.0), -1.0, 1.0))
 
             # safe action: brake + turn to center; keep z/yaw dim compatibility
-            action_arr[0] = 0.0
+            action_arr[0] = -0.1 if will_peer_collide else 0.0
             action_arr[-1] = turn_cmd
 
         return action_arr
