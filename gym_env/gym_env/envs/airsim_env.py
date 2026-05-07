@@ -68,6 +68,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.pursuit_safe_mask_boundary_margin = cfg.getfloat('options', 'pursuit_safe_mask_boundary_margin', fallback=4.0)
         self.pursuit_reset_min_depth_m = cfg.getfloat('options', 'pursuit_reset_min_depth_m', fallback=3.0)
         self.use_predictive_safety_filter = cfg.getboolean('options', 'use_predictive_safety_filter', fallback=True)
+        self.safety_filter_warmup_steps = cfg.getint('options', 'safety_filter_warmup_steps', fallback=0)
         self.safety_brake_margin = cfg.getfloat('options', 'safety_brake_margin', fallback=3.0)
         self.pursuit_safety_override_penalty = cfg.getfloat('options', 'pursuit_safety_override_penalty', fallback=3.0)
         self.pursuit_safe_separation_m = cfg.getfloat('options', 'pursuit_safe_separation_m', fallback=6.0)
@@ -1044,7 +1045,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
     def _apply_predictive_safety_filter(self, action_i, uav_idx):
         """Predict one-step motion and replace risky action with a safe one."""
-        if not self.use_predictive_safety_filter:
+        filter_enabled = self.use_predictive_safety_filter or (self.total_step < self.safety_filter_warmup_steps)
+        if not filter_enabled:
             return action_i
         if self.dynamic_name not in ['Multirotor', 'SimpleMultirotor']:
             return action_i
@@ -1114,7 +1116,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             turn_cmd = float(np.clip(yaw_error / (math.pi / 2.0), -1.0, 1.0))
 
             # safe action: brake + turn to center; keep z/yaw dim compatibility
-            action_arr[0] = -0.1 if will_peer_collide else 0.0
+            # keep movement possible, avoid fully freezing policy behavior
+            action_arr[0] = -0.05 if will_peer_collide else 0.15
             action_arr[-1] = turn_cmd
 
         return action_arr
