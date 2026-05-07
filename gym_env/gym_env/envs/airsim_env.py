@@ -55,9 +55,25 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.catch_distance = cfg.getfloat('options', 'catch_distance', fallback=5.0)
         self.pursuit_obstacle_penalty_weight = cfg.getfloat('options', 'pursuit_obstacle_penalty_weight', fallback=0.3)
         self.pursuit_safe_depth_m = cfg.getfloat('options', 'pursuit_safe_depth_m', fallback=8.0)
+        self.pursuit_boundary_penalty_weight = cfg.getfloat('options', 'pursuit_boundary_penalty_weight', fallback=0.6)
+        self.pursuit_boundary_safe_margin = cfg.getfloat('options', 'pursuit_boundary_safe_margin', fallback=8.0)
+        self.pursuit_out_penalty = cfg.getfloat('options', 'pursuit_out_penalty', fallback=300.0)
+        self.pursuit_use_visibility_reward_gate = cfg.getboolean('options', 'pursuit_use_visibility_reward_gate', fallback=True)
+        self.pursuit_visibility_half_fov_deg = cfg.getfloat('options', 'pursuit_visibility_half_fov_deg', fallback=55.0)
         self.pursuit_safety_shield = cfg.getboolean('options', 'pursuit_safety_shield', fallback=True)
         self.pursuit_shield_depth_m = cfg.getfloat('options', 'pursuit_shield_depth_m', fallback=4.5)
         self.pursuit_shield_min_scale = cfg.getfloat('options', 'pursuit_shield_min_scale', fallback=0.35)
+        self.pursuit_use_safe_mask = cfg.getboolean('options', 'pursuit_use_safe_mask', fallback=True)
+        self.pursuit_safe_mask_depth_m = cfg.getfloat('options', 'pursuit_safe_mask_depth_m', fallback=2.8)
+        self.pursuit_safe_mask_boundary_margin = cfg.getfloat('options', 'pursuit_safe_mask_boundary_margin', fallback=4.0)
+        self.pursuit_reset_min_depth_m = cfg.getfloat('options', 'pursuit_reset_min_depth_m', fallback=3.0)
+        self.use_predictive_safety_filter = cfg.getboolean('options', 'use_predictive_safety_filter', fallback=True)
+        self.safety_filter_warmup_steps = cfg.getint('options', 'safety_filter_warmup_steps', fallback=0)
+        self.safety_brake_margin = cfg.getfloat('options', 'safety_brake_margin', fallback=3.0)
+        self.pursuit_safety_override_penalty = cfg.getfloat('options', 'pursuit_safety_override_penalty', fallback=3.0)
+        self.pursuit_safe_separation_m = cfg.getfloat('options', 'pursuit_safe_separation_m', fallback=6.0)
+        self.pursuit_hard_boundary_margin = cfg.getfloat('options', 'pursuit_hard_boundary_margin', fallback=6.0)
+        self.no_fly_zones = self._parse_no_fly_zones(cfg.get('options', 'no_fly_zones', fallback=''))
         self.dual_policy = cfg.getboolean('options', 'dual_policy', fallback=False)
         self.control_role = cfg.get('options', 'control_role', fallback='all')
         self.opponent_model = None
@@ -206,6 +222,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self.max_episode_steps = 500
         else:
             raise Exception("Invalid env_name!", self.env_name)
+
+        if cfg.has_option('environment', 'max_episode_steps'):
+            self.max_episode_steps = cfg.getint('environment', 'max_episode_steps')
 
         if self.num_uavs > 1:
             for i, dynamic_model in enumerate(self.dynamic_models[1:], start=1):
@@ -358,6 +377,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 for dynamic_model in self.dynamic_models:
                     dynamic_model.reset()
 
+            self._run_post_reset_stabilization()
+
             if self.task_type != 'pursuit_2v1' or self.num_uavs <= 1:
                 reset_ok = True
                 break
@@ -387,6 +408,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.trajectory_list = []
         self.last_action_split_list = None
         self.last_position_list = None
+        self.last_safety_override_count = 0
         self.episode_uav_rewards = np.zeros(self.num_uavs, dtype=np.float32)
 
         if self.task_type == 'pursuit_2v1':
@@ -400,6 +422,21 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         self.last_obs = obs
         return obs
+
+    def _run_post_reset_stabilization(self):
+        """Let multirotors execute one zero-action step after reset to clear transient contacts."""
+        if self.dynamic_name not in ['Multirotor', 'SimpleMultirotor']:
+            return
+        try:
+            if hasattr(self, 'base_action_space'):
+                action_dim = int(self.base_action_space.shape[0])
+            else:
+                action_dim = 2
+            zero_action = np.zeros((action_dim,), dtype=np.float32)
+            for model in self.dynamic_models:
+                model.set_action(zero_action)
+        except Exception:
+            return
 
     def _randomize_pursuit_start_positions(self):
         """Randomize episode starts for pursuit task with wider spread and min-distance constraint."""
@@ -460,6 +497,13 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 if collision_info.has_collided:
                     return False
 
+            # 4) immediate obstacle clearance check (avoid spawning too close to obstacles)
+            if self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
+                for model in self.dynamic_models:
+                    depth_img = self.get_depth_image(client=model.client, vehicle_name=getattr(model, 'vehicle_name', ''))
+                    if float(np.min(depth_img)) < self.pursuit_reset_min_depth_m:
+                        return False
+
             return True
         except Exception:
             return False
@@ -490,9 +534,11 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         else:
             action, action_split_list = self._split_multi_uav_action(action)
             position_ue4 = []
+            self.last_safety_override_count = 0
             for i, dynamic_model in enumerate(self.dynamic_models):
                 action_i = action_split_list[i]
                 action_i = self._apply_pursuit_safety_shield(action_i, i)
+                action_i = self._apply_predictive_safety_filter(action_i, i)
                 dynamic_model.set_action(action_i)
                 position_ue4.append(dynamic_model.get_position())
             self.trajectory_list.append(position_ue4)
@@ -791,11 +837,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if closest_dist < 1.5 * self.catch_distance:
             near_catch_bonus = 2.0 * (1.5 * self.catch_distance - closest_dist) / max(self.catch_distance, 1e-3)
 
-        for prev_d, curr_d in zip(prev_distances, curr_distances):
+        for idx_local, (prev_d, curr_d) in enumerate(zip(prev_distances, curr_distances)):
             # dense chase shaping + urgency penalty
-            r = 3.0 * (prev_d - curr_d) - 0.05 + near_catch_bonus + coop_bonus - overlap_penalty
+            pursuer_idx = self.pursuer_indices[idx_local] if idx_local < len(self.pursuer_indices) else idx_local
+            vis = self._get_pursuer_target_visibility(pursuer_idx)
+            progress_reward = 3.0 * (prev_d - curr_d)
+            r = progress_reward * (0.25 + 0.75 * vis) - 0.05 + near_catch_bonus * vis + coop_bonus - overlap_penalty
             if caught:
-                r += 100.0
+                r += 200.0
             pursuer_rewards.append(r)
 
         # independent obstacle-avoidance shaping (dense): penalize near-obstacle motion
@@ -814,6 +863,24 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             pursuer_obs_penalty = float(np.mean(pursuer_obs_penalties))
             pursuer_rewards = [r - self.pursuit_obstacle_penalty_weight * pursuer_obs_penalty for r in pursuer_rewards]
 
+        # boundary-awareness shaping: penalize being too close to workspace boundary.
+        def boundary_penalty(pos):
+            margin_x = min(pos[0] - self.work_space_x[0], self.work_space_x[1] - pos[0])
+            margin_y = min(pos[1] - self.work_space_y[0], self.work_space_y[1] - pos[1])
+            margin_z = min(pos[2] - self.work_space_z[0], self.work_space_z[1] - pos[2])
+            min_margin = min(margin_x, margin_y, margin_z)
+            if min_margin >= self.pursuit_boundary_safe_margin:
+                return 0.0
+            return float(1.0 - np.clip(min_margin / max(self.pursuit_boundary_safe_margin, 1e-3), 0.0, 1.0))
+
+        pursuer_boundary_penalties = []
+        for pursuer_idx in self.pursuer_indices:
+            pos = np.asarray(self.dynamic_models[pursuer_idx].get_position(), dtype=np.float32)
+            pursuer_boundary_penalties.append(boundary_penalty(pos))
+        if len(pursuer_boundary_penalties) > 0:
+            pursuer_boundary_penalty = float(np.mean(pursuer_boundary_penalties))
+            pursuer_rewards = [r - self.pursuit_boundary_penalty_weight * pursuer_boundary_penalty for r in pursuer_rewards]
+
         prev_mean = float(np.mean(prev_distances))
         curr_mean = float(np.mean(curr_distances))
         evader_reward = 3.0 * (curr_mean - prev_mean) + 0.05
@@ -823,8 +890,18 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 (evader_min_depth - self.crash_distance) / max(self.pursuit_safe_depth_m - self.crash_distance, 1e-3),
                 0.0, 1.0)
             evader_reward -= self.pursuit_obstacle_penalty_weight * float(evader_obs_penalty)
+        evader_pos = np.asarray(self.dynamic_models[self.evader_index].get_position(), dtype=np.float32)
+        evader_reward -= self.pursuit_boundary_penalty_weight * boundary_penalty(evader_pos)
         if caught:
-            evader_reward -= 100.0
+            evader_reward -= 200.0
+
+        # Learning signal for safety filter usage:
+        # if runtime filter had to override action, penalize to push policy toward inherently safe outputs.
+        overrides = getattr(self, 'last_safety_override_count', 0)
+        if overrides > 0:
+            p_override = self.pursuit_safety_override_penalty * (float(overrides) / max(float(self.num_uavs), 1.0))
+            pursuer_rewards = [r - p_override for r in pursuer_rewards]
+            evader_reward -= p_override
 
         self.prev_pursuit_distances = curr_distances
 
@@ -833,7 +910,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         # terminal shaping to discourage collision-heavy policies
         if done and not caught:
-            if self.is_crashed() or self.is_not_inside_workspace():
+            if self.is_not_inside_workspace():
+                self.last_pursuer_reward -= self.pursuit_out_penalty
+                self.last_evader_reward -= self.pursuit_out_penalty
+            elif self.is_crashed():
                 self.last_pursuer_reward -= 40.0
                 self.last_evader_reward -= 40.0
             elif self.step_num >= self.max_episode_steps:
@@ -854,12 +934,193 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             return action_i
 
         min_depth = float(depth_list[uav_idx])
-        if min_depth >= self.pursuit_shield_depth_m:
+        obstacle_ratio = 1.0 if min_depth >= self.pursuit_shield_depth_m else np.clip(
+            min_depth / max(self.pursuit_shield_depth_m, 1e-3), 0.0, 1.0)
+
+        # near boundary -> additional slowdown
+        pos = np.asarray(self.dynamic_models[uav_idx].get_position(), dtype=np.float32)
+        margin_x = min(pos[0] - self.work_space_x[0], self.work_space_x[1] - pos[0])
+        margin_y = min(pos[1] - self.work_space_y[0], self.work_space_y[1] - pos[1])
+        margin_z = min(pos[2] - self.work_space_z[0], self.work_space_z[1] - pos[2])
+        min_margin = min(margin_x, margin_y, margin_z)
+        boundary_ratio = 1.0 if min_margin >= self.pursuit_boundary_safe_margin else np.clip(
+            min_margin / max(self.pursuit_boundary_safe_margin, 1e-3), 0.0, 1.0)
+
+        ratio = float(min(obstacle_ratio, boundary_ratio))
+        if ratio >= 1.0:
             return action_i
 
-        ratio = np.clip(min_depth / max(self.pursuit_shield_depth_m, 1e-3), 0.0, 1.0)
         scale = float(max(self.pursuit_shield_min_scale, ratio))
-        return np.asarray(action_i, dtype=np.float32) * scale
+        action_arr = np.asarray(action_i, dtype=np.float32).copy()
+        action_arr *= scale
+
+        # Hard safe-mask near high-risk states (close obstacle or close boundary):
+        # clamp forward speed and force turning away from boundary/into safer region.
+        # refresh depth at current step for tighter hard-constraint checks
+        live_min_depth = min_depth
+        try:
+            depth_img = self.get_depth_image(client=model.client, vehicle_name=getattr(model, 'vehicle_name', ''))
+            live_min_depth = float(np.min(depth_img))
+        except Exception:
+            pass
+
+        high_risk = (live_min_depth < self.pursuit_safe_mask_depth_m) or (min_margin < self.pursuit_safe_mask_boundary_margin)
+        if self.pursuit_use_safe_mask and high_risk and len(action_arr) >= 2:
+            # keep very small forward speed in risk zone
+            action_arr[0] = np.clip(action_arr[0], -0.1, 0.1)
+
+            # prefer turning toward workspace center when boundary is close
+            center_x = 0.5 * (self.work_space_x[0] + self.work_space_x[1])
+            center_y = 0.5 * (self.work_space_y[0] + self.work_space_y[1])
+            to_center = np.array([center_x - pos[0], center_y - pos[1]], dtype=np.float32)
+            if np.linalg.norm(to_center) > 1e-6:
+                desired_yaw = math.atan2(float(to_center[1]), float(to_center[0]))
+                current_yaw = float(self.dynamic_models[uav_idx].get_attitude()[2])
+                yaw_error = desired_yaw - current_yaw
+                while yaw_error > math.pi:
+                    yaw_error -= 2.0 * math.pi
+                while yaw_error < -math.pi:
+                    yaw_error += 2.0 * math.pi
+                turn_cmd = float(np.clip(yaw_error / (math.pi / 2.0), -1.0, 1.0))
+                action_arr[-1] = float(np.clip(0.2 * action_arr[-1] + 1.0 * turn_cmd, -1.0, 1.0))
+            else:
+                action_arr[-1] = float(np.sign(action_arr[-1]) if abs(action_arr[-1]) > 1e-6 else 1.0)
+
+        # If too close to boundary, actively steer yaw back to workspace center.
+        if boundary_ratio < 0.6 and len(action_arr) >= 2:
+            center_x = 0.5 * (self.work_space_x[0] + self.work_space_x[1])
+            center_y = 0.5 * (self.work_space_y[0] + self.work_space_y[1])
+            to_center = np.array([center_x - pos[0], center_y - pos[1]], dtype=np.float32)
+            if np.linalg.norm(to_center) > 1e-6:
+                desired_yaw = math.atan2(float(to_center[1]), float(to_center[0]))
+                current_yaw = float(self.dynamic_models[uav_idx].get_attitude()[2])
+                yaw_error = desired_yaw - current_yaw
+                while yaw_error > math.pi:
+                    yaw_error -= 2.0 * math.pi
+                while yaw_error < -math.pi:
+                    yaw_error += 2.0 * math.pi
+                turn_cmd = float(np.clip(yaw_error / (math.pi / 3.0), -1.0, 1.0))
+                action_arr[-1] = float(np.clip(0.8 * action_arr[-1] + 0.6 * turn_cmd, -1.0, 1.0))
+
+            # reduce forward speed further near boundary
+            action_arr[0] = action_arr[0] * max(self.pursuit_shield_min_scale, boundary_ratio * 0.85)
+
+        return action_arr
+
+    def _get_pursuer_target_visibility(self, pursuer_idx):
+        """Estimate whether target is in front of pursuer by yaw-error-to-goal."""
+        if not self.pursuit_use_visibility_reward_gate:
+            return 1.0
+        try:
+            yaw_error_deg = abs(float(self.dynamic_models[pursuer_idx].state_raw[2]))
+            vis = 1.0 - np.clip(yaw_error_deg / max(self.pursuit_visibility_half_fov_deg, 1e-3), 0.0, 1.0)
+            return float(vis)
+        except Exception:
+            return 1.0
+
+    def _parse_no_fly_zones(self, text):
+        """
+        Parse no-fly zones from string:
+        'x_min,x_max,y_min,y_max; x_min,x_max,y_min,y_max'
+        """
+        zones = []
+        if not text:
+            return zones
+        for chunk in text.split(';'):
+            vals = [v.strip() for v in chunk.split(',') if v.strip()]
+            if len(vals) != 4:
+                continue
+            try:
+                x_min, x_max, y_min, y_max = [float(v) for v in vals]
+            except ValueError:
+                continue
+            zones.append((min(x_min, x_max), max(x_min, x_max), min(y_min, y_max), max(y_min, y_max)))
+        return zones
+
+    def _is_in_no_fly_xy(self, x, y):
+        for x_min, x_max, y_min, y_max in getattr(self, 'no_fly_zones', []):
+            if x_min <= x <= x_max and y_min <= y <= y_max:
+                return True
+        return False
+
+    def _apply_predictive_safety_filter(self, action_i, uav_idx):
+        """Predict one-step motion and replace risky action with a safe one."""
+        filter_enabled = self.use_predictive_safety_filter or (self.total_step < self.safety_filter_warmup_steps)
+        if not filter_enabled:
+            return action_i
+        if self.dynamic_name not in ['Multirotor', 'SimpleMultirotor']:
+            return action_i
+
+        action_arr = np.asarray(action_i, dtype=np.float32).copy()
+        if len(action_arr) < 2:
+            return action_arr
+
+        model = self.dynamic_models[uav_idx]
+        pos = np.asarray(model.get_position(), dtype=np.float32)
+        yaw = float(model.get_attitude()[2])
+        dt = float(getattr(model, 'dt', 0.1))
+
+        v_xy_sp = float(action_arr[0]) * 0.7
+        yaw_rate_sp = float(action_arr[-1]) * 2.0
+        yaw_sp = yaw + yaw_rate_sp * dt
+        pred_x = float(pos[0] + v_xy_sp * math.cos(yaw_sp) * dt)
+        pred_y = float(pos[1] + v_xy_sp * math.sin(yaw_sp) * dt)
+
+        def will_leave_workspace_with_action(v_xy, yaw_rate, horizon_steps=3):
+            x, y, yyaw = float(pos[0]), float(pos[1]), float(yaw)
+            for _ in range(horizon_steps):
+                yyaw = yyaw + yaw_rate * dt
+                x += v_xy * math.cos(yyaw) * dt
+                y += v_xy * math.sin(yyaw) * dt
+                if x < self.work_space_x[0] or x > self.work_space_x[1] or y < self.work_space_y[0] or y > self.work_space_y[1]:
+                    return True
+            return False
+
+        will_out = will_leave_workspace_with_action(v_xy_sp, yaw_rate_sp, horizon_steps=3)
+        will_enter_no_fly = self._is_in_no_fly_xy(pred_x, pred_y)
+
+        # also apply near-boundary brake behavior
+        margin_x = min(pos[0] - self.work_space_x[0], self.work_space_x[1] - pos[0])
+        margin_y = min(pos[1] - self.work_space_y[0], self.work_space_y[1] - pos[1])
+        min_xy_margin = min(margin_x, margin_y)
+        near_boundary = min_xy_margin < self.safety_brake_margin
+        hard_boundary_risk = min_xy_margin < self.pursuit_hard_boundary_margin
+
+        # inter-UAV collision risk
+        nearest_peer_dist = 1e9
+        away_from_peer = None
+        for j, peer in enumerate(self.dynamic_models):
+            if j == uav_idx:
+                continue
+            peer_pos = np.asarray(peer.get_position(), dtype=np.float32)
+            diff = pos - peer_pos
+            d = float(np.linalg.norm(diff))
+            if d < nearest_peer_dist:
+                nearest_peer_dist = d
+                away_from_peer = diff
+        will_peer_collide = nearest_peer_dist < self.pursuit_safe_separation_m
+
+        if will_out or will_enter_no_fly or near_boundary or hard_boundary_risk or will_peer_collide:
+            self.last_safety_override_count = getattr(self, 'last_safety_override_count', 0) + 1
+            if will_peer_collide and away_from_peer is not None and np.linalg.norm(away_from_peer[:2]) > 1e-6:
+                desired_yaw = math.atan2(float(away_from_peer[1]), float(away_from_peer[0]))
+            else:
+                center_x = 0.5 * (self.work_space_x[0] + self.work_space_x[1])
+                center_y = 0.5 * (self.work_space_y[0] + self.work_space_y[1])
+                desired_yaw = math.atan2(center_y - float(pos[1]), center_x - float(pos[0]))
+            yaw_error = desired_yaw - yaw
+            while yaw_error > math.pi:
+                yaw_error -= 2.0 * math.pi
+            while yaw_error < -math.pi:
+                yaw_error += 2.0 * math.pi
+            turn_cmd = float(np.clip(yaw_error / (math.pi / 2.0), -1.0, 1.0))
+
+            # safe action: brake + turn to center; keep z/yaw dim compatibility
+            # keep movement possible, avoid fully freezing policy behavior
+            action_arr[0] = -0.05 if will_peer_collide else 0.15
+            action_arr[-1] = turn_cmd
+
+        return action_arr
 
     def get_uav_action_position_map(self, action_split_list=None, position_list=None):
         if self.num_uavs <= 1:
@@ -1629,6 +1890,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 in_desired_pose = False
                 break
         self._active_uav_idx = None
+        self._resolve_uav_names_with_airsim()
 
         return in_desired_pose
 
@@ -1735,6 +1997,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             action_position_map = info.get('uav_action_position_map', None)
             if action_position_map is not None:
                 self.client.simPrintLogMessage('UAV Action-Pos: ', str(action_position_map))
+                # Also print to Python console for easier debugging outside AirSim HUD.
+                print(f"[Console][EP {self.episode_num} STEP {self.step_num}] UAV Action-Pos: {action_position_map}")
         self.client.simPrintLogMessage(
             'Feature_norm: ', str(self.dynamic_model.state_norm))
         self.client.simPrintLogMessage(
