@@ -844,7 +844,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             progress_reward = 3.0 * (prev_d - curr_d)
             r = progress_reward * (0.25 + 0.75 * vis) - 0.05 + near_catch_bonus * vis + coop_bonus - overlap_penalty
             if caught:
-                r += 200.0
+                r += 140.0
             pursuer_rewards.append(r)
 
         # independent obstacle-avoidance shaping (dense): penalize near-obstacle motion
@@ -893,7 +893,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         evader_pos = np.asarray(self.dynamic_models[self.evader_index].get_position(), dtype=np.float32)
         evader_reward -= self.pursuit_boundary_penalty_weight * boundary_penalty(evader_pos)
         if caught:
-            evader_reward -= 200.0
+            evader_reward -= 140.0
 
         # Learning signal for safety filter usage:
         # if runtime filter had to override action, penalize to push policy toward inherently safe outputs.
@@ -914,8 +914,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 self.last_pursuer_reward -= self.pursuit_out_penalty
                 self.last_evader_reward -= self.pursuit_out_penalty
             elif self.is_crashed():
-                self.last_pursuer_reward -= 40.0
-                self.last_evader_reward -= 40.0
+                self.last_pursuer_reward -= 150.0
+                self.last_evader_reward -= 150.0
             elif self.step_num >= self.max_episode_steps:
                 # timeout means evader survived
                 self.last_pursuer_reward -= 5.0
