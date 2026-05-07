@@ -844,7 +844,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             progress_reward = 3.0 * (prev_d - curr_d)
             r = progress_reward * (0.25 + 0.75 * vis) - 0.05 + near_catch_bonus * vis + coop_bonus - overlap_penalty
             if caught:
-                r += 200.0
+                r += 140.0
             pursuer_rewards.append(r)
 
         # independent obstacle-avoidance shaping (dense): penalize near-obstacle motion
@@ -893,7 +893,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         evader_pos = np.asarray(self.dynamic_models[self.evader_index].get_position(), dtype=np.float32)
         evader_reward -= self.pursuit_boundary_penalty_weight * boundary_penalty(evader_pos)
         if caught:
-            evader_reward -= 200.0
+            evader_reward -= 140.0
 
         # Learning signal for safety filter usage:
         # if runtime filter had to override action, penalize to push policy toward inherently safe outputs.
@@ -914,8 +914,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 self.last_pursuer_reward -= self.pursuit_out_penalty
                 self.last_evader_reward -= self.pursuit_out_penalty
             elif self.is_crashed():
-                self.last_pursuer_reward -= 40.0
-                self.last_evader_reward -= 40.0
+                self.last_pursuer_reward -= 150.0
+                self.last_evader_reward -= 150.0
             elif self.step_num >= self.max_episode_steps:
                 # timeout means evader survived
                 self.last_pursuer_reward -= 5.0
@@ -967,7 +967,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         high_risk = (live_min_depth < self.pursuit_safe_mask_depth_m) or (min_margin < self.pursuit_safe_mask_boundary_margin)
         if self.pursuit_use_safe_mask and high_risk and len(action_arr) >= 2:
             # keep very small forward speed in risk zone
-            action_arr[0] = np.clip(action_arr[0], -0.1, 0.1)
+            action_arr[0] = float(np.clip(abs(action_arr[0]), 0.2, 0.45))
 
             # prefer turning toward workspace center when boundary is close
             center_x = 0.5 * (self.work_space_x[0] + self.work_space_x[1])
@@ -982,9 +982,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 while yaw_error < -math.pi:
                     yaw_error += 2.0 * math.pi
                 turn_cmd = float(np.clip(yaw_error / (math.pi / 2.0), -1.0, 1.0))
-                action_arr[-1] = float(np.clip(0.2 * action_arr[-1] + 1.0 * turn_cmd, -1.0, 1.0))
+                action_arr[-1] = float(np.clip(0.65 * action_arr[-1] + 0.45 * turn_cmd, -1.0, 1.0))
             else:
-                action_arr[-1] = float(np.sign(action_arr[-1]) if abs(action_arr[-1]) > 1e-6 else 1.0)
+                # already near center direction; avoid forcing constant spin-in-place
+                action_arr[-1] = float(np.clip(action_arr[-1], -0.5, 0.5))
 
         # If too close to boundary, actively steer yaw back to workspace center.
         if boundary_ratio < 0.6 and len(action_arr) >= 2:
@@ -1104,6 +1105,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self.last_safety_override_count = getattr(self, 'last_safety_override_count', 0) + 1
             if will_peer_collide and away_from_peer is not None and np.linalg.norm(away_from_peer[:2]) > 1e-6:
                 desired_yaw = math.atan2(float(away_from_peer[1]), float(away_from_peer[0]))
+            elif (uav_idx == self.evader_index) and (away_from_peer is not None) and (not near_boundary) and (not will_out) and (not will_enter_no_fly):
+                # do not drag evader toward map center unless boundary/outside risk is present
+                desired_yaw = math.atan2(float(away_from_peer[1]), float(away_from_peer[0]))
             else:
                 center_x = 0.5 * (self.work_space_x[0] + self.work_space_x[1])
                 center_y = 0.5 * (self.work_space_y[0] + self.work_space_y[1])
@@ -1117,7 +1121,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
             # safe action: brake + turn to center; keep z/yaw dim compatibility
             # keep movement possible, avoid fully freezing policy behavior
-            action_arr[0] = -0.05 if will_peer_collide else 0.15
+            action_arr[0] = 0.22 if will_peer_collide else 0.30
             action_arr[-1] = turn_cmd
 
         return action_arr
