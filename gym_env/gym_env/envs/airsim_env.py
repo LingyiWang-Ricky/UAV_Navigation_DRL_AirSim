@@ -71,6 +71,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.safety_brake_margin = cfg.getfloat('options', 'safety_brake_margin', fallback=3.0)
         self.pursuit_safety_override_penalty = cfg.getfloat('options', 'pursuit_safety_override_penalty', fallback=3.0)
         self.pursuit_safe_separation_m = cfg.getfloat('options', 'pursuit_safe_separation_m', fallback=6.0)
+        self.pursuit_hard_boundary_margin = cfg.getfloat('options', 'pursuit_hard_boundary_margin', fallback=6.0)
         self.no_fly_zones = self._parse_no_fly_zones(cfg.get('options', 'no_fly_zones', fallback=''))
         self.dual_policy = cfg.getboolean('options', 'dual_policy', fallback=False)
         self.control_role = cfg.get('options', 'control_role', fallback='all')
@@ -1063,16 +1064,25 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         pred_x = float(pos[0] + v_xy_sp * math.cos(yaw_sp) * dt)
         pred_y = float(pos[1] + v_xy_sp * math.sin(yaw_sp) * dt)
 
-        will_out = (
-            pred_x < self.work_space_x[0] or pred_x > self.work_space_x[1] or
-            pred_y < self.work_space_y[0] or pred_y > self.work_space_y[1]
-        )
+        def will_leave_workspace_with_action(v_xy, yaw_rate, horizon_steps=3):
+            x, y, yyaw = float(pos[0]), float(pos[1]), float(yaw)
+            for _ in range(horizon_steps):
+                yyaw = yyaw + yaw_rate * dt
+                x += v_xy * math.cos(yyaw) * dt
+                y += v_xy * math.sin(yyaw) * dt
+                if x < self.work_space_x[0] or x > self.work_space_x[1] or y < self.work_space_y[0] or y > self.work_space_y[1]:
+                    return True
+            return False
+
+        will_out = will_leave_workspace_with_action(v_xy_sp, yaw_rate_sp, horizon_steps=3)
         will_enter_no_fly = self._is_in_no_fly_xy(pred_x, pred_y)
 
         # also apply near-boundary brake behavior
         margin_x = min(pos[0] - self.work_space_x[0], self.work_space_x[1] - pos[0])
         margin_y = min(pos[1] - self.work_space_y[0], self.work_space_y[1] - pos[1])
-        near_boundary = min(margin_x, margin_y) < self.safety_brake_margin
+        min_xy_margin = min(margin_x, margin_y)
+        near_boundary = min_xy_margin < self.safety_brake_margin
+        hard_boundary_risk = min_xy_margin < self.pursuit_hard_boundary_margin
 
         # inter-UAV collision risk
         nearest_peer_dist = 1e9
@@ -1088,7 +1098,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 away_from_peer = diff
         will_peer_collide = nearest_peer_dist < self.pursuit_safe_separation_m
 
-        if will_out or will_enter_no_fly or near_boundary or will_peer_collide:
+        if will_out or will_enter_no_fly or near_boundary or hard_boundary_risk or will_peer_collide:
             self.last_safety_override_count = getattr(self, 'last_safety_override_count', 0) + 1
             if will_peer_collide and away_from_peer is not None and np.linalg.norm(away_from_peer[:2]) > 1e-6:
                 desired_yaw = math.atan2(float(away_from_peer[1]), float(away_from_peer[0]))
