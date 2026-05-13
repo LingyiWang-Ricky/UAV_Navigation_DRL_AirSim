@@ -714,11 +714,12 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if norm < 1e-3:
             away_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
             norm = 1.0
-        # For evader policy, use pursuer centroid as dynamic reference so state features
-        # directly encode threat geometry (distance/yaw to pursuers).
+        evade_distance = max(self.uav_start_separation, self.catch_distance * 2.0)
+        evade_dir_xy = away_vec[:2] / norm
+        target_xy = evader_pos[:2] + evade_dir_xy * evade_distance
         evader_goal = np.array([
-            np.clip(pursuer_center[0], self.work_space_x[0], self.work_space_x[1]),
-            np.clip(pursuer_center[1], self.work_space_y[0], self.work_space_y[1]),
+            np.clip(target_xy[0], self.work_space_x[0], self.work_space_x[1]),
+            np.clip(target_xy[1], self.work_space_y[0], self.work_space_y[1]),
             np.clip(evader_pos[2], self.work_space_z[0], self.work_space_z[1])
         ], dtype=np.float32)
         self.dynamic_models[self.evader_index].goal_position = evader_goal.tolist()
@@ -753,10 +754,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if closest_dist < 1.5 * self.catch_distance:
             near_catch_bonus = 2.0 * (1.5 * self.catch_distance - closest_dist) / max(self.catch_distance, 1e-3)
 
+        prev_closest = min(prev_distances)
+        curr_closest = min(curr_distances)
+        team_progress_bonus = 4.0 * (prev_closest - curr_closest)
+
         for pursuer_local_idx, (prev_d, curr_d) in enumerate(zip(prev_distances, curr_distances)):
             pursuer_global_idx = self.pursuer_indices[pursuer_local_idx]
             # dense chase shaping + urgency penalty
-            r = 3.0 * (prev_d - curr_d) - 0.05 + near_catch_bonus
+            r = 3.0 * (prev_d - curr_d) + team_progress_bonus - 0.05 + near_catch_bonus
             # penalize flying close to workspace boundaries to reduce out-of-bound episodes
             r -= workspace_penalties[pursuer_global_idx]
             # immediate collision penalty
@@ -768,7 +773,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         prev_mean = float(np.mean(prev_distances))
         curr_mean = float(np.mean(curr_distances))
-        evader_reward = 3.0 * (curr_mean - prev_mean) + 0.05
+        evader_reward = 3.0 * (curr_mean - prev_mean) - team_progress_bonus + 0.05
         evader_reward -= workspace_penalties[self.evader_index]
         if crash_flags[self.evader_index]:
             evader_reward -= 40.0
@@ -1536,8 +1541,15 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
     def is_in_desired_pose(self):
         if self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
-            distances = self._get_pursuit_distances()
-            return any(d <= self.catch_distance for d in distances)
+            evader_pos = np.asarray(self.dynamic_models[self.evader_index].get_position(), dtype=np.float32)
+            z_tolerance = max(2.0, self.catch_distance)
+            for idx in self.pursuer_indices:
+                pursuer_pos = np.asarray(self.dynamic_models[idx].get_position(), dtype=np.float32)
+                horizontal_dist = np.linalg.norm((pursuer_pos - evader_pos)[:2])
+                vertical_dist = abs(float(pursuer_pos[2] - evader_pos[2]))
+                if horizontal_dist <= self.catch_distance and vertical_dist <= z_tolerance:
+                    return True
+            return False
 
         if self._active_uav_idx is not None:
             return self.get_distance_to_goal_3d() < self.accept_radius
