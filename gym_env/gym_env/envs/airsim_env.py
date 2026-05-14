@@ -234,17 +234,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         self.trajectory_list = []
 
-        # observation space vector or image
-        if self.perception_type == 'vector' or self.perception_type == 'lgmd':
-            self.observation_space = spaces.Box(low=0, high=1,
-                                                shape=(1,
-                                                       self.num_uavs * (self.cnn_feature_length + self.state_feature_length)),
-                                                dtype=np.float32)
-        else:
-            self.observation_space = spaces.Box(low=0, high=255,
-                                                shape=(self.screen_height,
-                                                       self.screen_width, 2 * self.num_uavs),
-                                                dtype=np.uint8)
+        self._update_observation_space_for_role()
 
         self.base_action_space = self.dynamic_model.action_space
         if self.num_uavs == 1:
@@ -257,6 +247,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         if self.dual_policy and self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
             self._update_action_space_for_role()
+            self._update_observation_space_for_role()
 
         self.reward_type = None
         try:
@@ -650,10 +641,35 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             high=np.tile(self.base_action_space.high, count),
             dtype=np.float32)
 
+    def _update_observation_space_for_role(self):
+        if self.dual_policy and self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
+            if self.control_role == 'pursuer':
+                obs_uav_count = len(self.pursuer_indices)
+            elif self.control_role == 'evader':
+                obs_uav_count = 1
+            else:
+                obs_uav_count = self.num_uavs
+        else:
+            obs_uav_count = self.num_uavs
+
+        if self.perception_type == 'vector' or self.perception_type == 'lgmd':
+            self.observation_space = spaces.Box(
+                low=0, high=1,
+                shape=(1, obs_uav_count * (self.cnn_feature_length + self.state_feature_length)),
+                dtype=np.float32
+            )
+        else:
+            self.observation_space = spaces.Box(
+                low=0, high=255,
+                shape=(self.screen_height, self.screen_width, 2 * obs_uav_count),
+                dtype=np.uint8
+            )
+
     def set_control_role(self, role):
         self.control_role = role
         if self.dual_policy and self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
             self._update_action_space_for_role()
+            self._update_observation_space_for_role()
 
     def set_opponent_model(self, model):
         self.opponent_model = model
@@ -847,10 +863,20 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
     def get_obs(self):
         if self.num_uavs > 1:
             self.min_distance_to_obstacles_all = []
+            if self.dual_policy and self.task_type == 'pursuit_2v1':
+                if self.control_role == 'pursuer':
+                    obs_models = [self.dynamic_models[idx] for idx in self.pursuer_indices]
+                elif self.control_role == 'evader':
+                    obs_models = [self.dynamic_models[self.evader_index]]
+                else:
+                    obs_models = self.dynamic_models
+            else:
+                obs_models = self.dynamic_models
+
             if self.perception_type == 'vector':
-                obs_all = [self.get_obs_vector_single(dynamic_model) for dynamic_model in self.dynamic_models]
+                obs_all = [self.get_obs_vector_single(dynamic_model) for dynamic_model in obs_models]
                 return np.concatenate(obs_all, axis=1)
-            obs_all = [self.get_obs_image_single(dynamic_model) for dynamic_model in self.dynamic_models]
+            obs_all = [self.get_obs_image_single(dynamic_model) for dynamic_model in obs_models]
             return np.concatenate(obs_all, axis=2)
 
         if self.perception_type == 'vector':
