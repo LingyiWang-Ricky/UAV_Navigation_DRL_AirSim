@@ -541,8 +541,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         if self.num_uavs > 1:
             if self.task_type == 'pursuit_2v1':
-                pursuer_rewards = [self.last_pursuer_reward for _ in self.pursuer_indices]
-                role_rewards = pursuer_rewards + [self.last_evader_reward]
+                role_rewards = [0.0 for _ in range(self.num_uavs)]
+                for idx in self.pursuer_indices:
+                    role_rewards[idx] = self.last_pursuer_reward
+                role_rewards[self.evader_index] = self.last_evader_reward
                 self.last_multi_uav_reward_list = role_rewards
             if hasattr(self, 'last_multi_uav_reward_list') and len(self.last_multi_uav_reward_list) >= self.num_uavs:
                 self.episode_uav_rewards += np.asarray(self.last_multi_uav_reward_list[:self.num_uavs], dtype=np.float32)
@@ -677,16 +679,36 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
     def _sample_or_predict_opponent_action(self, expected_agent_count=1):
         action_dim = self.base_action_space.shape[0]
         expected_size = expected_agent_count * action_dim
-        if self.opponent_model is None or not hasattr(self, 'last_obs'):
+        if self.opponent_model is None:
             return np.concatenate([self.base_action_space.sample() for _ in range(expected_agent_count)], axis=0)
         try:
-            action, _ = self.opponent_model.predict(self.last_obs, deterministic=False)
+            opponent_role = 'evader' if self.control_role == 'pursuer' else 'pursuer'
+            opponent_obs = self._get_obs_for_role(opponent_role)
+            action, _ = self.opponent_model.predict(opponent_obs, deterministic=False)
             action = np.asarray(action, dtype=np.float32).reshape(-1)
             if action.size >= expected_size:
                 return action[:expected_size]
         except Exception:
             pass
         return np.concatenate([self.base_action_space.sample() for _ in range(expected_agent_count)], axis=0)
+
+    def _get_obs_for_role(self, role='all'):
+        if self.num_uavs <= 1:
+            return self.get_obs()
+
+        self.min_distance_to_obstacles_all = []
+        if role == 'pursuer':
+            obs_models = [self.dynamic_models[idx] for idx in self.pursuer_indices]
+        elif role == 'evader':
+            obs_models = [self.dynamic_models[self.evader_index]]
+        else:
+            obs_models = self.dynamic_models
+
+        if self.perception_type == 'vector':
+            obs_all = [self.get_obs_vector_single(dynamic_model) for dynamic_model in obs_models]
+            return np.concatenate(obs_all, axis=1)
+        obs_all = [self.get_obs_image_single(dynamic_model) for dynamic_model in obs_models]
+        return np.concatenate(obs_all, axis=2)
 
     def _compose_full_action_for_dual_policy(self, action):
         action = np.asarray(action, dtype=np.float32).reshape(-1)
@@ -864,20 +886,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if self.num_uavs > 1:
             self.min_distance_to_obstacles_all = []
             if self.dual_policy and self.task_type == 'pursuit_2v1':
-                if self.control_role == 'pursuer':
-                    obs_models = [self.dynamic_models[idx] for idx in self.pursuer_indices]
-                elif self.control_role == 'evader':
-                    obs_models = [self.dynamic_models[self.evader_index]]
-                else:
-                    obs_models = self.dynamic_models
-            else:
-                obs_models = self.dynamic_models
-
-            if self.perception_type == 'vector':
-                obs_all = [self.get_obs_vector_single(dynamic_model) for dynamic_model in obs_models]
-                return np.concatenate(obs_all, axis=1)
-            obs_all = [self.get_obs_image_single(dynamic_model) for dynamic_model in obs_models]
-            return np.concatenate(obs_all, axis=2)
+                return self._get_obs_for_role(self.control_role)
+            return self._get_obs_for_role('all')
 
         if self.perception_type == 'vector':
             obs = self.get_obs_vector()
