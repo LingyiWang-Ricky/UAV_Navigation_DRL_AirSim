@@ -105,6 +105,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if self.task_type == 'pursuit_2v1' and self.num_uavs < 3:
             raise ValueError('task_type=pursuit_2v1 requires num_uavs >= 3')
         self.prev_pursuit_distances = None
+        self.pursuit_surround_reward_coef = cfg.getfloat('options', 'pursuit_surround_reward_coef', fallback=0.0)
+        self.pursuit_teammate_too_close_dist = cfg.getfloat('options', 'pursuit_teammate_too_close_dist', fallback=4.0)
+        self.pursuit_teammate_too_close_penalty = cfg.getfloat('options', 'pursuit_teammate_too_close_penalty', fallback=0.0)
 
         if self.num_uavs > 1 and self.dynamic_name in ['Multirotor', 'SimpleMultirotor']:
             for i, model in enumerate(self.dynamic_models):
@@ -234,17 +237,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         self.trajectory_list = []
 
-        # observation space vector or image
-        if self.perception_type == 'vector' or self.perception_type == 'lgmd':
-            self.observation_space = spaces.Box(low=0, high=1,
-                                                shape=(1,
-                                                       self.num_uavs * (self.cnn_feature_length + self.state_feature_length)),
-                                                dtype=np.float32)
-        else:
-            self.observation_space = spaces.Box(low=0, high=255,
-                                                shape=(self.screen_height,
-                                                       self.screen_width, 2 * self.num_uavs),
-                                                dtype=np.uint8)
+        self._update_observation_space_for_role()
 
         self.base_action_space = self.dynamic_model.action_space
         if self.num_uavs == 1:
@@ -257,6 +250,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         if self.dual_policy and self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
             self._update_action_space_for_role()
+            self._update_observation_space_for_role()
 
         self.reward_type = None
         try:
@@ -550,8 +544,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         if self.num_uavs > 1:
             if self.task_type == 'pursuit_2v1':
-                pursuer_rewards = [self.last_pursuer_reward for _ in self.pursuer_indices]
-                role_rewards = pursuer_rewards + [self.last_evader_reward]
+                role_rewards = [0.0 for _ in range(self.num_uavs)]
+                for idx in self.pursuer_indices:
+                    role_rewards[idx] = self.last_pursuer_reward
+                role_rewards[self.evader_index] = self.last_evader_reward
                 self.last_multi_uav_reward_list = role_rewards
             if hasattr(self, 'last_multi_uav_reward_list') and len(self.last_multi_uav_reward_list) >= self.num_uavs:
                 self.episode_uav_rewards += np.asarray(self.last_multi_uav_reward_list[:self.num_uavs], dtype=np.float32)
@@ -650,10 +646,35 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             high=np.tile(self.base_action_space.high, count),
             dtype=np.float32)
 
+    def _update_observation_space_for_role(self):
+        if self.dual_policy and self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
+            if self.control_role == 'pursuer':
+                obs_uav_count = len(self.pursuer_indices)
+            elif self.control_role == 'evader':
+                obs_uav_count = 1
+            else:
+                obs_uav_count = self.num_uavs
+        else:
+            obs_uav_count = self.num_uavs
+
+        if self.perception_type == 'vector' or self.perception_type == 'lgmd':
+            self.observation_space = spaces.Box(
+                low=0, high=1,
+                shape=(1, obs_uav_count * (self.cnn_feature_length + self.state_feature_length)),
+                dtype=np.float32
+            )
+        else:
+            self.observation_space = spaces.Box(
+                low=0, high=255,
+                shape=(self.screen_height, self.screen_width, 2 * obs_uav_count),
+                dtype=np.uint8
+            )
+
     def set_control_role(self, role):
         self.control_role = role
         if self.dual_policy and self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
             self._update_action_space_for_role()
+            self._update_observation_space_for_role()
 
     def set_opponent_model(self, model):
         self.opponent_model = model
@@ -661,16 +682,39 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
     def _sample_or_predict_opponent_action(self, expected_agent_count=1):
         action_dim = self.base_action_space.shape[0]
         expected_size = expected_agent_count * action_dim
-        if self.opponent_model is None or not hasattr(self, 'last_obs'):
+        if self.opponent_model is None:
             return np.concatenate([self.base_action_space.sample() for _ in range(expected_agent_count)], axis=0)
         try:
-            action, _ = self.opponent_model.predict(self.last_obs, deterministic=False)
+            opponent_role = 'evader' if self.control_role == 'pursuer' else 'pursuer'
+            opponent_obs = self._get_obs_for_role(opponent_role)
+            action, _ = self.opponent_model.predict(opponent_obs, deterministic=False)
             action = np.asarray(action, dtype=np.float32).reshape(-1)
             if action.size >= expected_size:
                 return action[:expected_size]
         except Exception:
             pass
         return np.concatenate([self.base_action_space.sample() for _ in range(expected_agent_count)], axis=0)
+
+    def _get_obs_for_role(self, role='all'):
+        if self.num_uavs <= 1:
+            return self.get_obs()
+
+        self.min_distance_to_obstacles_all = []
+        self._obs_model_indices = []
+        if role == 'pursuer':
+            obs_indices = list(self.pursuer_indices)
+        elif role == 'evader':
+            obs_indices = [self.evader_index]
+        else:
+            obs_indices = list(range(self.num_uavs))
+        obs_models = [self.dynamic_models[idx] for idx in obs_indices]
+        self._obs_model_indices = obs_indices
+
+        if self.perception_type == 'vector':
+            obs_all = [self.get_obs_vector_single(dynamic_model) for dynamic_model in obs_models]
+            return np.concatenate(obs_all, axis=1)
+        obs_all = [self.get_obs_image_single(dynamic_model) for dynamic_model in obs_models]
+        return np.concatenate(obs_all, axis=2)
 
     def _compose_full_action_for_dual_policy(self, action):
         action = np.asarray(action, dtype=np.float32).reshape(-1)
@@ -757,11 +801,14 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         prev_closest = min(prev_distances)
         curr_closest = min(curr_distances)
         team_progress_bonus = 4.0 * (prev_closest - curr_closest)
+        surround_bonus = self._compute_surround_bonus()
+        teammate_close_penalty = self._compute_teammate_close_penalty()
 
         for pursuer_local_idx, (prev_d, curr_d) in enumerate(zip(prev_distances, curr_distances)):
             pursuer_global_idx = self.pursuer_indices[pursuer_local_idx]
             # dense chase shaping + urgency penalty
-            r = 3.0 * (prev_d - curr_d) + team_progress_bonus - 0.05 + near_catch_bonus
+            r = 3.0 * (prev_d - curr_d) + team_progress_bonus - 0.05 + near_catch_bonus + surround_bonus
+            r -= teammate_close_penalty
             # penalize flying close to workspace boundaries to reduce out-of-bound episodes
             r -= workspace_penalties[pursuer_global_idx]
             # immediate collision penalty
@@ -797,6 +844,35 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         # single scalar for centralized policy / fallback
         return float(self.last_pursuer_reward + self.last_evader_reward)
+
+    def _compute_surround_bonus(self):
+        if len(self.pursuer_indices) < 2 or self.pursuit_surround_reward_coef <= 0.0:
+            return 0.0
+        evader_pos = np.asarray(self.dynamic_models[self.evader_index].get_position(), dtype=np.float32)
+        angles = []
+        for idx in self.pursuer_indices:
+            pursuer_pos = np.asarray(self.dynamic_models[idx].get_position(), dtype=np.float32)
+            vec = pursuer_pos[:2] - evader_pos[:2]
+            angles.append(np.arctan2(vec[1], vec[0]))
+        angles = np.sort(np.asarray(angles, dtype=np.float32))
+        gaps = np.diff(np.concatenate([angles, angles[:1] + 2 * np.pi]))
+        min_gap = float(np.min(gaps))
+        # 2 pursuers ideal opposite -> gap = pi. normalize to [0, 1].
+        surround_score = np.clip(min_gap / np.pi, 0.0, 1.0)
+        return float(self.pursuit_surround_reward_coef * surround_score)
+
+    def _compute_teammate_close_penalty(self):
+        if len(self.pursuer_indices) < 2 or self.pursuit_teammate_too_close_penalty <= 0.0:
+            return 0.0
+        positions = [np.asarray(self.dynamic_models[idx].get_position(), dtype=np.float32) for idx in self.pursuer_indices]
+        min_pair = float('inf')
+        for i in range(len(positions)):
+            for j in range(i + 1, len(positions)):
+                min_pair = min(min_pair, float(np.linalg.norm(positions[i] - positions[j])))
+        if min_pair >= self.pursuit_teammate_too_close_dist:
+            return 0.0
+        ratio = (self.pursuit_teammate_too_close_dist - min_pair) / max(self.pursuit_teammate_too_close_dist, 1e-3)
+        return float(self.pursuit_teammate_too_close_penalty * ratio)
 
     def _compute_workspace_margin_penalties(self, margin=8.0, max_penalty=6.0):
         penalties = [0.0 for _ in range(self.num_uavs)]
@@ -847,11 +923,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
     def get_obs(self):
         if self.num_uavs > 1:
             self.min_distance_to_obstacles_all = []
-            if self.perception_type == 'vector':
-                obs_all = [self.get_obs_vector_single(dynamic_model) for dynamic_model in self.dynamic_models]
-                return np.concatenate(obs_all, axis=1)
-            obs_all = [self.get_obs_image_single(dynamic_model) for dynamic_model in self.dynamic_models]
-            return np.concatenate(obs_all, axis=2)
+            if self.dual_policy and self.task_type == 'pursuit_2v1':
+                return self._get_obs_for_role(self.control_role)
+            return self._get_obs_for_role('all')
 
         if self.perception_type == 'vector':
             obs = self.get_obs_vector()
@@ -1576,7 +1650,18 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 collision_info = dynamic_model.client.simGetCollisionInfo(vehicle_name=getattr(dynamic_model, 'vehicle_name', ''))
             except TypeError:
                 collision_info = dynamic_model.client.simGetCollisionInfo()
-            min_distance = self.min_distance_to_obstacles if self.num_uavs == 1 else self.min_distance_to_obstacles_all[i]
+            if self.num_uavs == 1:
+                min_distance = self.min_distance_to_obstacles
+            else:
+                obs_indices = getattr(self, '_obs_model_indices', list(range(self.num_uavs)))
+                if i in obs_indices:
+                    obs_local_idx = obs_indices.index(i)
+                    if obs_local_idx < len(self.min_distance_to_obstacles_all):
+                        min_distance = self.min_distance_to_obstacles_all[obs_local_idx]
+                    else:
+                        min_distance = float('inf')
+                else:
+                    min_distance = float('inf')
             penetration_depth = getattr(collision_info, 'penetration_depth', 0.0)
             collision_hit = collision_info.has_collided or penetration_depth > 1e-3
             if self.task_type == 'pursuit_2v1' and self.num_uavs > 1:
