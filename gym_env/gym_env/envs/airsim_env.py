@@ -57,6 +57,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.pursuit_init_max_dist = cfg.getfloat('options', 'pursuit_init_max_dist', fallback=max(self.uav_start_separation * 2.5, self.catch_distance * 5.0))
         self.dual_policy = cfg.getboolean('options', 'dual_policy', fallback=False)
         self.control_role = cfg.get('options', 'control_role', fallback='all')
+        self.pursuit_opponent_deterministic = cfg.getboolean('options', 'pursuit_opponent_deterministic', fallback=True)
         self.opponent_model = None
         uav_names_raw = cfg.get('options', 'uav_names', fallback='Drone1,Drone2')
         self.uav_names = [name.strip() for name in uav_names_raw.split(',') if name.strip()]
@@ -719,7 +720,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         try:
             opponent_role = 'evader' if self.control_role == 'pursuer' else 'pursuer'
             opponent_obs = self._get_obs_for_role(opponent_role)
-            action, _ = self.opponent_model.predict(opponent_obs, deterministic=False)
+            action, _ = self.opponent_model.predict(
+                opponent_obs,
+                deterministic=self.pursuit_opponent_deterministic
+            )
             action = np.asarray(action, dtype=np.float32).reshape(-1)
             if action.size >= expected_size:
                 return action[:expected_size]
