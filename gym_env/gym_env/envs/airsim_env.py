@@ -53,6 +53,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.task_type = cfg.get('options', 'task_type', fallback='goal_nav')
         self.uav_start_separation = cfg.getfloat('options', 'uav_start_separation', fallback=10.0)
         self.catch_distance = cfg.getfloat('options', 'catch_distance', fallback=5.0)
+        self.pursuit_init_min_dist = cfg.getfloat('options', 'pursuit_init_min_dist', fallback=max(self.uav_start_separation, self.catch_distance * 2.0))
+        self.pursuit_init_max_dist = cfg.getfloat('options', 'pursuit_init_max_dist', fallback=max(self.uav_start_separation * 2.5, self.catch_distance * 5.0))
         self.dual_policy = cfg.getboolean('options', 'dual_policy', fallback=False)
         self.control_role = cfg.get('options', 'control_role', fallback='all')
         self.opponent_model = None
@@ -385,29 +387,59 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         return obs
 
     def _randomize_pursuit_start_positions(self):
-        """Randomize episode starts for pursuit task with wider spread and min-distance constraint."""
+        """Randomize episode starts for pursuit task with learnable geometry.
+
+        Two pursuers are initialized with enough teammate separation, while the evader
+        is spawned in an annulus around pursuer centroid instead of anywhere in the map.
+        This avoids extremely long initial distances that make catch events too sparse.
+        """
         if self.num_uavs <= 1:
             return
 
         margin = 20.0
         min_pair_dist = max(self.uav_start_separation * 1.2, 10.0)
+        init_min_dist = max(self.pursuit_init_min_dist, self.catch_distance * 1.2)
+        init_max_dist = max(self.pursuit_init_max_dist, init_min_dist + 1.0)
         z = float(self.dynamic_models[0].start_position[2]) if len(self.dynamic_models[0].start_position) > 2 else 5.0
 
-        sampled_xy = []
-        for i in range(self.num_uavs):
+        sampled_xy = [None for _ in range(self.num_uavs)]
+
+        # 1) sample pursuers with pairwise minimum distance
+        for idx in self.pursuer_indices:
             chosen = None
             for _ in range(300):
                 sx = np.random.uniform(self.work_space_x[0] + margin, self.work_space_x[1] - margin)
                 sy = np.random.uniform(self.work_space_y[0] + margin, self.work_space_y[1] - margin)
-                if all(np.hypot(sx - px, sy - py) >= min_pair_dist for px, py in sampled_xy):
+                existing = [p for p in sampled_xy if p is not None]
+                if all(np.hypot(sx - px, sy - py) >= min_pair_dist for px, py in existing):
                     chosen = (sx, sy)
                     break
             if chosen is None:
-                # fallback: still keep inside workspace
                 sx = np.random.uniform(self.work_space_x[0] + margin, self.work_space_x[1] - margin)
                 sy = np.random.uniform(self.work_space_y[0] + margin, self.work_space_y[1] - margin)
                 chosen = (sx, sy)
-            sampled_xy.append(chosen)
+            sampled_xy[idx] = chosen
+
+        # 2) sample evader around pursuer centroid in [init_min_dist, init_max_dist]
+        pursuer_xy = np.asarray([sampled_xy[idx] for idx in self.pursuer_indices], dtype=np.float32)
+        center_xy = np.mean(pursuer_xy, axis=0)
+        evader_xy = None
+        for _ in range(300):
+            radius = np.random.uniform(init_min_dist, init_max_dist)
+            angle = np.random.uniform(0.0, 2.0 * np.pi)
+            ex = center_xy[0] + radius * np.cos(angle)
+            ey = center_xy[1] + radius * np.sin(angle)
+            if ex < self.work_space_x[0] + margin or ex > self.work_space_x[1] - margin:
+                continue
+            if ey < self.work_space_y[0] + margin or ey > self.work_space_y[1] - margin:
+                continue
+            evader_xy = (float(ex), float(ey))
+            break
+        if evader_xy is None:
+            ex = np.clip(center_xy[0] + init_min_dist, self.work_space_x[0] + margin, self.work_space_x[1] - margin)
+            ey = np.clip(center_xy[1], self.work_space_y[0] + margin, self.work_space_y[1] - margin)
+            evader_xy = (float(ex), float(ey))
+        sampled_xy[self.evader_index] = evader_xy
 
         for i, model in enumerate(self.dynamic_models):
             sx, sy = sampled_xy[i]
