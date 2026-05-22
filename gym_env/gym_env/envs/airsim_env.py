@@ -111,6 +111,11 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.pursuit_surround_reward_coef = cfg.getfloat('options', 'pursuit_surround_reward_coef', fallback=0.0)
         self.pursuit_teammate_too_close_dist = cfg.getfloat('options', 'pursuit_teammate_too_close_dist', fallback=4.0)
         self.pursuit_teammate_too_close_penalty = cfg.getfloat('options', 'pursuit_teammate_too_close_penalty', fallback=0.0)
+        self.pursuit_progress_coef = cfg.getfloat('options', 'pursuit_progress_coef', fallback=4.0)
+        self.pursuit_individual_progress_coef = cfg.getfloat('options', 'pursuit_individual_progress_coef', fallback=2.0)
+        self.pursuit_step_penalty = cfg.getfloat('options', 'pursuit_step_penalty', fallback=0.02)
+        self.pursuit_near_catch_bonus_coef = cfg.getfloat('options', 'pursuit_near_catch_bonus_coef', fallback=1.0)
+        self.pursuit_workspace_penalty_max = cfg.getfloat('options', 'pursuit_workspace_penalty_max', fallback=1.5)
 
         if self.num_uavs > 1 and self.dynamic_name in ['Multirotor', 'SimpleMultirotor']:
             for i, model in enumerate(self.dynamic_models):
@@ -825,41 +830,47 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         prev_distances = self.prev_pursuit_distances
         caught = any(d <= self.catch_distance for d in curr_distances)
 
-        workspace_penalties = self._compute_workspace_margin_penalties()
+        workspace_penalties = self._compute_workspace_margin_penalties(max_penalty=self.pursuit_workspace_penalty_max)
         crash_flags = self._get_collision_flags()
+        outside_flags = self._get_outside_workspace_flags()
 
         pursuer_rewards = []
         closest_dist = min(curr_distances)
         near_catch_bonus = 0.0
         if closest_dist < 1.5 * self.catch_distance:
-            near_catch_bonus = 2.0 * (1.5 * self.catch_distance - closest_dist) / max(self.catch_distance, 1e-3)
+            near_catch_bonus = self.pursuit_near_catch_bonus_coef * (1.5 * self.catch_distance - closest_dist) / max(self.catch_distance, 1e-3)
 
         prev_closest = min(prev_distances)
         curr_closest = min(curr_distances)
-        team_progress_bonus = 4.0 * (prev_closest - curr_closest)
+        team_progress_bonus = self.pursuit_progress_coef * (prev_closest - curr_closest)
         surround_bonus = self._compute_surround_bonus()
         teammate_close_penalty = self._compute_teammate_close_penalty()
 
         for pursuer_local_idx, (prev_d, curr_d) in enumerate(zip(prev_distances, curr_distances)):
             pursuer_global_idx = self.pursuer_indices[pursuer_local_idx]
             # dense chase shaping + urgency penalty
-            r = 3.0 * (prev_d - curr_d) + team_progress_bonus - 0.05 + near_catch_bonus + surround_bonus
+            r = self.pursuit_individual_progress_coef * (prev_d - curr_d) + team_progress_bonus \
+                - self.pursuit_step_penalty + near_catch_bonus + surround_bonus
             r -= teammate_close_penalty
             # penalize flying close to workspace boundaries to reduce out-of-bound episodes
             r -= workspace_penalties[pursuer_global_idx]
             # immediate collision penalty
             if crash_flags[pursuer_global_idx]:
                 r -= 40.0
+            if outside_flags[pursuer_global_idx]:
+                r -= 25.0
             if caught:
                 r += 30.0
             pursuer_rewards.append(r)
 
         prev_mean = float(np.mean(prev_distances))
         curr_mean = float(np.mean(curr_distances))
-        evader_reward = 3.0 * (curr_mean - prev_mean) - team_progress_bonus + 0.05
+        evader_reward = self.pursuit_individual_progress_coef * (curr_mean - prev_mean) - team_progress_bonus + self.pursuit_step_penalty
         evader_reward -= workspace_penalties[self.evader_index]
         if crash_flags[self.evader_index]:
             evader_reward -= 40.0
+        if outside_flags[self.evader_index]:
+            evader_reward -= 25.0
         if caught:
             evader_reward -= 30.0
 
@@ -870,10 +881,13 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         # terminal shaping to discourage collision-heavy policies
         if done and not caught:
-            if self.is_crashed() or self.is_not_inside_workspace():
-                self.last_pursuer_reward -= 40.0
-                self.last_evader_reward -= 40.0
-            elif self.step_num >= self.max_episode_steps:
+            pursuer_fail = any(crash_flags[idx] or outside_flags[idx] for idx in self.pursuer_indices)
+            evader_fail = crash_flags[self.evader_index] or outside_flags[self.evader_index]
+            if pursuer_fail:
+                self.last_pursuer_reward -= 35.0
+            if evader_fail:
+                self.last_evader_reward -= 35.0
+            if (not pursuer_fail) and (not evader_fail) and self.step_num >= self.max_episode_steps:
                 # timeout means evader survived
                 self.last_pursuer_reward -= 5.0
                 self.last_evader_reward += 10.0
@@ -933,6 +947,17 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 collision_info = dynamic_model.client.simGetCollisionInfo()
             penetration_depth = getattr(collision_info, 'penetration_depth', 0.0)
             flags[i] = collision_info.has_collided or penetration_depth > 1e-3
+        return flags
+
+    def _get_outside_workspace_flags(self):
+        flags = [False for _ in range(self.num_uavs)]
+        for i, model in enumerate(self.dynamic_models):
+            x, y, z = model.get_position()
+            flags[i] = (
+                x < self.work_space_x[0] or x > self.work_space_x[1] or
+                y < self.work_space_y[0] or y > self.work_space_y[1] or
+                z < self.work_space_z[0] or z > self.work_space_z[1]
+            )
         return flags
 
     def get_uav_action_position_map(self, action_split_list=None, position_list=None):
@@ -1617,6 +1642,24 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
     def is_done(self):
         episode_done = False
+
+        if self.task_type == 'pursuit_2v1' and self.num_uavs > 1 and self.dual_policy:
+            outside_flags = self._get_outside_workspace_flags()
+            crash_flags = self._get_collision_flags()
+            caught = self.is_in_desired_pose()
+            pursuer_failed = any(outside_flags[idx] or crash_flags[idx] for idx in self.pursuer_indices)
+            evader_failed = outside_flags[self.evader_index] or crash_flags[self.evader_index]
+            timeout = self.step_num >= self.max_episode_steps
+
+            if self.control_role == 'pursuer':
+                # End episode if either side fails, but reward attribution stays role-specific
+                # in compute_pursuit_reward().
+                episode_done = caught or pursuer_failed or evader_failed or timeout
+                return episode_done
+            if self.control_role == 'evader':
+                # Symmetric termination for cleaner training trajectories.
+                episode_done = caught or evader_failed or pursuer_failed or timeout
+                return episode_done
 
         is_not_inside_workspace_now = self.is_not_inside_workspace()
         has_reached_des_pose = self.is_in_desired_pose()
