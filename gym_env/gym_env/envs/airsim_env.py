@@ -129,6 +129,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         else:
             self.pursuer_indices = [i for i in range(self.num_uavs) if i != self.evader_index]
         self.prev_pursuit_distances = None
+        self.evader_heading_xy = np.array([1.0, 0.0], dtype=np.float32)
         self.pursuit_surround_reward_coef = cfg.getfloat('options', 'pursuit_surround_reward_coef', fallback=0.0)
         self.pursuit_teammate_too_close_dist = cfg.getfloat('options', 'pursuit_teammate_too_close_dist', fallback=4.0)
         self.pursuit_teammate_too_close_penalty = cfg.getfloat('options', 'pursuit_teammate_too_close_penalty', fallback=0.0)
@@ -410,6 +411,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if self.task_type == 'pursuit_2v1':
             self._update_pursuit_goals()
             self._update_pursuit_distance_cache()
+            self.evader_heading_xy = np.array([1.0, 0.0], dtype=np.float32)
 
         obs = self.get_obs()
 
@@ -833,10 +835,28 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         vel_xy = evader_vel[:2]
         speed_xy = float(np.linalg.norm(vel_xy))
-        if speed_xy < 1e-3:
+        if speed_xy < 0.4:
+            # At low speed, velocity heading is noisy and can rotate goals rapidly,
+            # which may cause side pursuers to spin in place.
+            pursuer_positions = [np.asarray(self.dynamic_models[idx].get_position(), dtype=np.float32)
+                                 for idx in self.pursuer_indices]
+            pursuer_center_xy = np.mean(np.asarray(pursuer_positions, dtype=np.float32)[:, :2], axis=0)
+            chase_vec = evader_pos[:2] - pursuer_center_xy
+            chase_norm = float(np.linalg.norm(chase_vec))
+            if chase_norm > 1e-3:
+                heading_raw = chase_vec / chase_norm
+            else:
+                heading_raw = self.evader_heading_xy
+        else:
+            heading_raw = vel_xy / speed_xy
+        # smooth heading to reduce abrupt target oscillation
+        heading_mix = 0.85 * self.evader_heading_xy + 0.15 * heading_raw
+        heading_norm = float(np.linalg.norm(heading_mix))
+        if heading_norm < 1e-6:
             heading_xy = np.array([1.0, 0.0], dtype=np.float32)
         else:
-            heading_xy = vel_xy / speed_xy
+            heading_xy = (heading_mix / heading_norm).astype(np.float32)
+        self.evader_heading_xy = heading_xy
         lateral_xy = np.array([-heading_xy[1], heading_xy[0]], dtype=np.float32)
         intercept_radius = self.pursuit_intercept_radius + self.pursuit_intercept_radius_gain * speed_xy
 
@@ -849,7 +869,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 # spread pursuers on a forward interception arc (not pure lateral),
                 # which avoids side pursuers receiving almost-tangential goals that
                 # can cause turning in place for extra pursuers (e.g., 3rd pursuer).
-                theta_max = np.deg2rad(60.0)
+                theta_max = np.deg2rad(45.0)
                 if n_p == 2:
                     theta = -theta_max if k == 0 else theta_max
                 else:
