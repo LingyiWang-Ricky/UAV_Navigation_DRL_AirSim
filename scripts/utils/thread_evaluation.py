@@ -105,6 +105,16 @@ class EvaluateThread(QtCore.QThread):
                 evader_model = _load_single_model(evader_path)
                 self.env.set_control_role('pursuer')
                 self.env.set_opponent_model(evader_model)
+                # quick sanity-check: if this fails, env would fallback and opponent behavior degrades badly
+                try:
+                    _ = evader_model.predict(
+                        self.env._get_obs_for_role('evader'),
+                        deterministic=self.cfg.getboolean('options', 'pursuit_opponent_deterministic', fallback=True)
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Dual-policy eval loaded evader checkpoint but predict failed: {type(e).__name__}: {e}"
+                    ) from e
                 print(f'[Eval] dual-policy enabled, pursuer={pursuer_path}, evader={evader_path}')
             else:
                 print('[Eval][Warning] dual_policy=true but dual checkpoints are missing; fallback to single-model eval.')

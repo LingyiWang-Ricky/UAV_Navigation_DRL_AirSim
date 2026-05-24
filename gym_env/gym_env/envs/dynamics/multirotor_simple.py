@@ -51,6 +51,10 @@ class MultirotorDynamicsSimple():
         self.acc_xy_max = cfg.getfloat('multirotor', 'acc_xy_max')
         self.v_xy_max = cfg.getfloat('multirotor', 'v_xy_max')
         self.v_xy_min = cfg.getfloat('multirotor', 'v_xy_min')
+        self.task_type = cfg.get('options', 'task_type', fallback='goal_nav')
+        self.pursuit_allow_stop = cfg.getboolean('options', 'pursuit_allow_stop', fallback=True)
+        if self.task_type == 'pursuit_2v1' and self.pursuit_allow_stop:
+            self.v_xy_min = 0.0
         self.v_z_max = cfg.getfloat('multirotor', 'v_z_max')
         self.yaw_rate_max_deg = cfg.getfloat('multirotor', 'yaw_rate_max_deg')
         self.yaw_rate_max_rad = math.radians(self.yaw_rate_max_deg)
@@ -96,6 +100,8 @@ class MultirotorDynamicsSimple():
         self.client.simSetVehiclePose(pose, False, vehicle_name=self.vehicle_name)
 
     def set_action(self, action):
+        action = np.asarray(action, dtype=np.float32)
+        action = np.clip(action, self.action_space.low, self.action_space.high)
         # ------------update control command---------------
         self.v_xy = action[0]
         self.yaw_rate = action[-1]
