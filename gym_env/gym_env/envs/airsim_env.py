@@ -846,10 +846,17 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self.dynamic_models[self.pursuer_indices[0]].goal_position = evader_pos.tolist()
         else:
             for k, idx in enumerate(self.pursuer_indices):
-                # spread pursuers in [-1, 1] along lateral axis and bias forward.
-                alpha = (2.0 * k / max(1, n_p - 1)) - 1.0
-                forward_weight = np.sqrt(max(0.0, 1.0 - alpha * alpha))
-                offset_xy = (forward_weight * heading_xy + alpha * lateral_xy) * intercept_radius
+                # spread pursuers on a forward interception arc (not pure lateral),
+                # which avoids side pursuers receiving almost-tangential goals that
+                # can cause turning in place for extra pursuers (e.g., 3rd pursuer).
+                theta_max = np.deg2rad(60.0)
+                if n_p == 2:
+                    theta = -theta_max if k == 0 else theta_max
+                else:
+                    theta = -theta_max + (2.0 * theta_max) * (k / max(1, n_p - 1))
+                forward_weight = np.cos(theta)
+                lateral_weight = np.sin(theta)
+                offset_xy = (forward_weight * heading_xy + lateral_weight * lateral_xy) * intercept_radius
                 target_xy = evader_pos[:2] + offset_xy
                 goal = np.array([
                     np.clip(target_xy[0], self.work_space_x[0], self.work_space_x[1]),
