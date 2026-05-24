@@ -248,6 +248,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.client = self.dynamic_model.client
         self.state_feature_length = self.dynamic_model.state_feature_length
         self.cnn_feature_length = self.cfg.getint('options', 'cnn_feature_num')
+        if self.perception_type == 'vector':
+            # Vector observation currently uses split_row=1, split_col=5 image pooling features.
+            # Keep observation space consistent with get_obs_vector_single().
+            self.cnn_feature_length = 5
 
         # training state
         self.episode_num = 0
