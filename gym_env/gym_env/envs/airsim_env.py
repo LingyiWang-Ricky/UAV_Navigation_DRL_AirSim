@@ -137,6 +137,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.pursuit_step_penalty = cfg.getfloat('options', 'pursuit_step_penalty', fallback=0.02)
         self.pursuit_near_catch_bonus_coef = cfg.getfloat('options', 'pursuit_near_catch_bonus_coef', fallback=1.0)
         self.pursuit_workspace_penalty_max = cfg.getfloat('options', 'pursuit_workspace_penalty_max', fallback=1.5)
+        self.pursuit_intercept_radius = cfg.getfloat('options', 'pursuit_intercept_radius', fallback=max(self.catch_distance * 1.6, 8.0))
+        self.pursuit_intercept_radius_gain = cfg.getfloat('options', 'pursuit_intercept_radius_gain', fallback=0.8)
 
         if self.num_uavs > 1 and self.dynamic_name in ['Multirotor', 'SimpleMultirotor']:
             for i, model in enumerate(self.dynamic_models):
@@ -824,10 +826,37 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             return
 
         evader_pos = np.asarray(self.dynamic_models[self.evader_index].get_position(), dtype=np.float32)
+        try:
+            evader_vel = np.asarray(self.dynamic_models[self.evader_index].get_velocity(), dtype=np.float32)
+        except Exception:
+            evader_vel = np.zeros(3, dtype=np.float32)
 
-        # pursuers chase evader
-        for idx in self.pursuer_indices:
-            self.dynamic_models[idx].goal_position = evader_pos.tolist()
+        vel_xy = evader_vel[:2]
+        speed_xy = float(np.linalg.norm(vel_xy))
+        if speed_xy < 1e-3:
+            heading_xy = np.array([1.0, 0.0], dtype=np.float32)
+        else:
+            heading_xy = vel_xy / speed_xy
+        lateral_xy = np.array([-heading_xy[1], heading_xy[0]], dtype=np.float32)
+        intercept_radius = self.pursuit_intercept_radius + self.pursuit_intercept_radius_gain * speed_xy
+
+        # cooperative interception: assign pursuers around a forward arc
+        n_p = len(self.pursuer_indices)
+        if n_p <= 1:
+            self.dynamic_models[self.pursuer_indices[0]].goal_position = evader_pos.tolist()
+        else:
+            for k, idx in enumerate(self.pursuer_indices):
+                # spread pursuers in [-1, 1] along lateral axis and bias forward.
+                alpha = (2.0 * k / max(1, n_p - 1)) - 1.0
+                forward_weight = np.sqrt(max(0.0, 1.0 - alpha * alpha))
+                offset_xy = (forward_weight * heading_xy + alpha * lateral_xy) * intercept_radius
+                target_xy = evader_pos[:2] + offset_xy
+                goal = np.array([
+                    np.clip(target_xy[0], self.work_space_x[0], self.work_space_x[1]),
+                    np.clip(target_xy[1], self.work_space_y[0], self.work_space_y[1]),
+                    np.clip(evader_pos[2], self.work_space_z[0], self.work_space_z[1]),
+                ], dtype=np.float32)
+                self.dynamic_models[idx].goal_position = goal.tolist()
 
         # evader goal: move away from pursuers centroid
         pursuer_positions = [np.asarray(self.dynamic_models[idx].get_position(), dtype=np.float32)
@@ -838,7 +867,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if norm < 1e-3:
             away_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
             norm = 1.0
-        evade_distance = max(self.uav_start_separation, self.catch_distance * 2.0)
+        evade_distance = max(self.uav_start_separation, self.catch_distance * 2.0, intercept_radius)
         evade_dir_xy = away_vec[:2] / norm
         target_xy = evader_pos[:2] + evade_dir_xy * evade_distance
         evader_goal = np.array([
