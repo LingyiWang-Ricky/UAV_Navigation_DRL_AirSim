@@ -779,9 +779,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             action = np.asarray(action, dtype=np.float32).reshape(-1)
             if action.size >= expected_size:
                 return action[:expected_size]
-        except Exception:
-            pass
-        return np.concatenate([self.base_action_space.sample() for _ in range(expected_agent_count)], axis=0)
+            print(f"[Warning] opponent action size mismatch: got {action.size}, expected >= {expected_size}.")
+        except Exception as e:
+            print(f"[Warning] opponent_model.predict failed ({type(e).__name__}: {e}), fallback to zero action.")
+        return np.zeros(expected_size, dtype=np.float32)
 
     def _get_obs_for_role(self, role='all'):
         if self.num_uavs <= 1:
@@ -903,7 +904,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 self.pursuer_goal_cache[idx] = goal_smoothed
                 self.dynamic_models[idx].goal_position = goal_smoothed.tolist()
 
-        # evader goal: move away from pursuers centroid
+        # evader goal: move away from pursuers centroid.
+        # NOTE: do not define the target as "current_evader_pos + fixed_distance * dir"
+        # every step, otherwise the evader-observation keeps seeing near-constant relative
+        # goal distance and can converge to a fixed-radius turning pattern.
         pursuer_positions = [np.asarray(self.dynamic_models[idx].get_position(), dtype=np.float32)
                              for idx in self.pursuer_indices]
         pursuer_center = np.mean(pursuer_positions, axis=0)
@@ -914,7 +918,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             norm = 1.0
         evade_distance = max(self.uav_start_separation, self.catch_distance * 2.0, intercept_radius)
         evade_dir_xy = away_vec[:2] / norm
-        target_xy = evader_pos[:2] + evade_dir_xy * evade_distance
+        # Anchor evader target to pursuer centroid ray (absolute point), not self-relative point.
+        # This produces a non-constant goal geometry and allows training to alter behavior.
+        target_xy = pursuer_center[:2] + evade_dir_xy * evade_distance
         evader_goal = np.array([
             np.clip(target_xy[0], self.work_space_x[0], self.work_space_x[1]),
             np.clip(target_xy[1], self.work_space_y[0], self.work_space_y[1]),
