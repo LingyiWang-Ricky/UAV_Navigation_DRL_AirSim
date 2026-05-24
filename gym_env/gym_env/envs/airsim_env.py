@@ -130,6 +130,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self.pursuer_indices = [i for i in range(self.num_uavs) if i != self.evader_index]
         self.prev_pursuit_distances = None
         self.evader_heading_xy = np.array([1.0, 0.0], dtype=np.float32)
+        self.pursuer_goal_cache = {}
         self.pursuit_surround_reward_coef = cfg.getfloat('options', 'pursuit_surround_reward_coef', fallback=0.0)
         self.pursuit_teammate_too_close_dist = cfg.getfloat('options', 'pursuit_teammate_too_close_dist', fallback=4.0)
         self.pursuit_teammate_too_close_penalty = cfg.getfloat('options', 'pursuit_teammate_too_close_penalty', fallback=0.0)
@@ -412,6 +413,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             self._update_pursuit_goals()
             self._update_pursuit_distance_cache()
             self.evader_heading_xy = np.array([1.0, 0.0], dtype=np.float32)
+            self.pursuer_goal_cache = {}
 
         obs = self.get_obs()
 
@@ -883,7 +885,15 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                     np.clip(target_xy[1], self.work_space_y[0], self.work_space_y[1]),
                     np.clip(evader_pos[2], self.work_space_z[0], self.work_space_z[1]),
                 ], dtype=np.float32)
-                self.dynamic_models[idx].goal_position = goal.tolist()
+                # smooth per-pursuer sub-goals to avoid high-frequency oscillation
+                # that can cause extra pursuers to keep yawing in place.
+                prev_goal = self.pursuer_goal_cache.get(idx, None)
+                if prev_goal is None:
+                    goal_smoothed = goal
+                else:
+                    goal_smoothed = 0.75 * prev_goal + 0.25 * goal
+                self.pursuer_goal_cache[idx] = goal_smoothed
+                self.dynamic_models[idx].goal_position = goal_smoothed.tolist()
 
         # evader goal: move away from pursuers centroid
         pursuer_positions = [np.asarray(self.dynamic_models[idx].get_position(), dtype=np.float32)
