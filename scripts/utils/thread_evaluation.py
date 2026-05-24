@@ -81,14 +81,34 @@ class EvaluateThread(QtCore.QThread):
     def run_drl_model(self):
         print('start evaluation')
         algo = self.cfg.get('options', 'algo')
-        if algo == 'TD3':
-            model = TD3.load(self.model_file, env=self.env)
-        elif algo == 'SAC':
-            model = SAC.load(self.model_file, env=self.env)
-        elif algo == 'PPO':
-            model = PPO.load(self.model_file, env=self.env)
-        else:
+        dual_policy = self.cfg.getboolean('options', 'dual_policy', fallback=False)
+        pursuit_task = self.cfg.get('options', 'task_type', fallback='goal_nav') == 'pursuit_2v1'
+        use_dual_eval = dual_policy and pursuit_task and getattr(self.env, 'num_uavs', 1) > 1
+
+        def _load_single_model(path):
+            if algo == 'TD3':
+                return TD3.load(path, env=self.env)
+            if algo == 'SAC':
+                return SAC.load(path, env=self.env)
+            if algo == 'PPO':
+                return PPO.load(path, env=self.env)
             raise Exception('algo set error {}'.format(algo))
+
+        model = _load_single_model(self.model_file)
+        evader_model = None
+        if use_dual_eval:
+            model_dir = os.path.dirname(self.model_file)
+            pursuer_path = os.path.join(model_dir, 'model_pursuer_sb3.zip')
+            evader_path = os.path.join(model_dir, 'model_evader_sb3.zip')
+            if os.path.exists(pursuer_path) and os.path.exists(evader_path):
+                model = _load_single_model(pursuer_path)
+                evader_model = _load_single_model(evader_path)
+                self.env.set_control_role('pursuer')
+                self.env.set_opponent_model(evader_model)
+                print(f'[Eval] dual-policy enabled, pursuer={pursuer_path}, evader={evader_path}')
+            else:
+                print('[Eval][Warning] dual_policy=true but dual checkpoints are missing; fallback to single-model eval.')
+
         self.env.model = model
 
         obs = self.env.reset()
