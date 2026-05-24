@@ -141,6 +141,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.pursuit_workspace_penalty_max = cfg.getfloat('options', 'pursuit_workspace_penalty_max', fallback=1.5)
         self.pursuit_intercept_radius = cfg.getfloat('options', 'pursuit_intercept_radius', fallback=max(self.catch_distance * 1.6, 8.0))
         self.pursuit_intercept_radius_gain = cfg.getfloat('options', 'pursuit_intercept_radius_gain', fallback=0.8)
+        self.pursuit_goal_update_interval = cfg.getint('options', 'pursuit_goal_update_interval', fallback=3)
+        self.pursuit_goal_min_shift = cfg.getfloat('options', 'pursuit_goal_min_shift', fallback=1.0)
 
         if self.num_uavs > 1 and self.dynamic_name in ['Multirotor', 'SimpleMultirotor']:
             for i, model in enumerate(self.dynamic_models):
@@ -828,6 +830,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
     def _update_pursuit_goals(self):
         if self.task_type != 'pursuit_2v1' or self.num_uavs <= 1:
             return
+        if self.step_num > 0 and len(self.pursuer_goal_cache) > 0:
+            interval = max(1, int(self.pursuit_goal_update_interval))
+            if (self.step_num % interval) != 0:
+                return
 
         evader_pos = np.asarray(self.dynamic_models[self.evader_index].get_position(), dtype=np.float32)
         try:
@@ -892,6 +898,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                     goal_smoothed = goal
                 else:
                     goal_smoothed = 0.75 * prev_goal + 0.25 * goal
+                    if np.linalg.norm(goal_smoothed[:2] - prev_goal[:2]) < self.pursuit_goal_min_shift:
+                        goal_smoothed = prev_goal
                 self.pursuer_goal_cache[idx] = goal_smoothed
                 self.dynamic_models[idx].goal_position = goal_smoothed.tolist()
 
