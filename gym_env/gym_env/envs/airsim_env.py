@@ -51,6 +51,13 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self.perception_type = cfg.get('options', 'perception')
         self.num_uavs = cfg.getint('options', 'num_uavs', fallback=1)
         self.task_type = cfg.get('options', 'task_type', fallback='goal_nav')
+        self.num_pursuers = cfg.getint('options', 'num_pursuers', fallback=max(self.num_uavs - 1, 1))
+        if self.task_type == 'pursuit_2v1':
+            # Generalize pursuit_2v1 config to Nv1 by exposing num_pursuers as hyperparameter.
+            min_required_uavs = max(2, self.num_pursuers + 1)
+            if self.num_uavs < min_required_uavs:
+                print(f"[Info] num_uavs={self.num_uavs} is smaller than num_pursuers+1={min_required_uavs}, auto-adjust num_uavs.")
+                self.num_uavs = min_required_uavs
         self.uav_start_separation = cfg.getfloat('options', 'uav_start_separation', fallback=10.0)
         self.catch_distance = cfg.getfloat('options', 'catch_distance', fallback=5.0)
         self.pursuit_init_min_dist = cfg.getfloat('options', 'pursuit_init_min_dist', fallback=max(self.uav_start_separation, self.catch_distance * 2.0))
@@ -105,11 +112,22 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             raise Exception("Invalid dynamic_name!", self.dynamic_name)
         self.dynamic_model = self.dynamic_models[0]
 
-        # pursuit settings: first N-1 are pursuers, last one is evader by default
-        self.evader_index = cfg.getint('options', 'evader_index', fallback=max(self.num_uavs - 1, 0))
-        self.pursuer_indices = [i for i in range(self.num_uavs) if i != self.evader_index]
-        if self.task_type == 'pursuit_2v1' and self.num_uavs < 3:
-            raise ValueError('task_type=pursuit_2v1 requires num_uavs >= 3')
+        # pursuit settings: first num_pursuers are pursuers, one evader after them.
+        self.evader_index = cfg.getint('options', 'evader_index', fallback=min(self.num_pursuers, self.num_uavs - 1))
+        if self.task_type == 'pursuit_2v1':
+            if self.num_uavs < 2:
+                raise ValueError('task_type=pursuit_2v1 requires num_uavs >= 2')
+            if self.num_pursuers >= self.num_uavs:
+                self.num_pursuers = max(1, self.num_uavs - 1)
+                self.evader_index = self.num_pursuers
+                print(f"[Info] Adjusted num_pursuers to {self.num_pursuers} to keep one evader.")
+            self.pursuer_indices = list(range(self.num_pursuers))
+            if self.evader_index in self.pursuer_indices:
+                self.evader_index = min(self.num_uavs - 1, self.num_pursuers)
+            if self.evader_index in self.pursuer_indices:
+                self.evader_index = self.num_uavs - 1
+        else:
+            self.pursuer_indices = [i for i in range(self.num_uavs) if i != self.evader_index]
         self.prev_pursuit_distances = None
         self.pursuit_surround_reward_coef = cfg.getfloat('options', 'pursuit_surround_reward_coef', fallback=0.0)
         self.pursuit_teammate_too_close_dist = cfg.getfloat('options', 'pursuit_teammate_too_close_dist', fallback=4.0)
