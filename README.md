@@ -219,6 +219,40 @@ If you see `Connection failed: Request timed out`:
 - Ensure your `Documents/AirSim/settings.json` is actually the one used by AirSim.
 - Verify RPC port. The checker now prints detected open ports in `41451-41460` when handshake fails.
 
+## Pursuit Nv1 setup (N pursuers + 1 evader)
+
+`task_type = pursuit_2v1` has been generalized to **Nv1** via `num_pursuers`.
+
+1. In config (see `configs/config_Pursuit_SimpleMultirotor_Nv1.ini`):
+
+   ```ini
+   task_type = pursuit_2v1
+   dual_policy = True
+   num_pursuers = 3
+   num_uavs = 4
+   evader_index = 3
+   uav_names = Drone1,Drone2,Drone3,Drone4
+   ```
+
+   Rule: `num_uavs = num_pursuers + 1` (one evader).
+
+2. In AirSim `settings.json`, define all vehicles listed in `uav_names`.
+
+3. For dual-policy self-play, keep:
+
+   ```ini
+   control_role = all
+   algo = SAC
+   ```
+
+4. During evaluation, dual-policy mode expects:
+   - `model_pursuer_sb3.zip`
+   - `model_evader_sb3.zip`
+
+Notes:
+- 3 pursuers means `num_pursuers = 3`, `num_uavs = 4`.
+- N pursuers means `num_pursuers = N`, `num_uavs = N + 1`.
+
 ## GUI for training and evaluation
 
 ![img](resources/figures/gui_for_train_and_eval.png)
