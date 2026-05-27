@@ -253,6 +253,8 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         self.client = self.dynamic_model.client
         self.state_feature_length = self.dynamic_model.state_feature_length
+        # Extra pursuit teammate features (dx, dy). Only pursuers receive non-zero values.
+        self.pursuit_teammate_feature_dim = 2
         self.cnn_feature_length = self.cfg.getint('options', 'cnn_feature_num')
         if self.perception_type == 'vector':
             # Vector observation currently uses split_row=1, split_col=5 image pooling features.
@@ -745,7 +747,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         if self.perception_type == 'vector' or self.perception_type == 'lgmd':
             self.observation_space = spaces.Box(
                 low=0, high=1,
-                shape=(1, obs_uav_count * (self.cnn_feature_length + self.state_feature_length)),
+                shape=(1, obs_uav_count * (self.cnn_feature_length + self.state_feature_length + self.pursuit_teammate_feature_dim)),
                 dtype=np.float32
             )
         else:
@@ -779,9 +781,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             action = np.asarray(action, dtype=np.float32).reshape(-1)
             if action.size >= expected_size:
                 return action[:expected_size]
-        except Exception:
-            pass
-        return np.concatenate([self.base_action_space.sample() for _ in range(expected_agent_count)], axis=0)
+            print(f"[Warning] opponent action size mismatch: got {action.size}, expected >= {expected_size}.")
+        except Exception as e:
+            print(f"[Warning] opponent_model.predict failed ({type(e).__name__}: {e}), fallback to zero action.")
+        return np.zeros(expected_size, dtype=np.float32)
 
     def _get_obs_for_role(self, role='all'):
         if self.num_uavs <= 1:
@@ -799,7 +802,7 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         self._obs_model_indices = obs_indices
 
         if self.perception_type == 'vector':
-            obs_all = [self.get_obs_vector_single(dynamic_model) for dynamic_model in obs_models]
+            obs_all = [self.get_obs_vector_single(dynamic_model, model_idx=obs_indices[i]) for i, dynamic_model in enumerate(obs_models)]
             return np.concatenate(obs_all, axis=1)
         obs_all = [self.get_obs_image_single(dynamic_model) for dynamic_model in obs_models]
         return np.concatenate(obs_all, axis=2)
@@ -903,7 +906,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
                 self.pursuer_goal_cache[idx] = goal_smoothed
                 self.dynamic_models[idx].goal_position = goal_smoothed.tolist()
 
-        # evader goal: move away from pursuers centroid
+        # evader goal: move away from pursuers centroid.
+        # NOTE: do not define the target as "current_evader_pos + fixed_distance * dir"
+        # every step, otherwise the evader-observation keeps seeing near-constant relative
+        # goal distance and can converge to a fixed-radius turning pattern.
         pursuer_positions = [np.asarray(self.dynamic_models[idx].get_position(), dtype=np.float32)
                              for idx in self.pursuer_indices]
         pursuer_center = np.mean(pursuer_positions, axis=0)
@@ -914,7 +920,9 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             norm = 1.0
         evade_distance = max(self.uav_start_separation, self.catch_distance * 2.0, intercept_radius)
         evade_dir_xy = away_vec[:2] / norm
-        target_xy = evader_pos[:2] + evade_dir_xy * evade_distance
+        # Anchor evader target to pursuer centroid ray (absolute point), not self-relative point.
+        # This produces a non-constant goal geometry and allows training to alter behavior.
+        target_xy = pursuer_center[:2] + evade_dir_xy * evade_distance
         evader_goal = np.array([
             np.clip(target_xy[0], self.work_space_x[0], self.work_space_x[1]),
             np.clip(target_xy[1], self.work_space_y[0], self.work_space_y[1]),
@@ -1149,7 +1157,33 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
         image_with_state = image_with_state.swapaxes(0, 1)
         return image_with_state
 
-    def get_obs_vector_single(self, dynamic_model):
+    def get_pursuit_teammate_features(self, model_idx):
+        """Return teammate-relative feature [dx, dy] in [0,1].
+        - Evader role returns zeros.
+        - Only pursuers can see teammate relative position.
+        - Evader position is intentionally masked from teammate feature.
+        """
+        if self.task_type != 'pursuit_2v1' or self.num_uavs <= 1:
+            return np.zeros(self.pursuit_teammate_feature_dim, dtype=np.float32)
+        if model_idx == self.evader_index or model_idx not in self.pursuer_indices:
+            return np.zeros(self.pursuit_teammate_feature_dim, dtype=np.float32)
+
+        teammate_indices = [idx for idx in self.pursuer_indices if idx != model_idx]
+        if len(teammate_indices) == 0:
+            return np.zeros(self.pursuit_teammate_feature_dim, dtype=np.float32)
+
+        self_pos = np.asarray(self.dynamic_models[model_idx].get_position(), dtype=np.float32)
+        teammate_pos = np.asarray([self.dynamic_models[idx].get_position() for idx in teammate_indices], dtype=np.float32)
+        rel_mean_xy = np.mean(teammate_pos[:, :2] - self_pos[:2], axis=0)
+
+        span_x = max(1e-3, float(self.work_space_x[1] - self.work_space_x[0]))
+        span_y = max(1e-3, float(self.work_space_y[1] - self.work_space_y[0]))
+        rel_norm = np.array([rel_mean_xy[0] / span_x, rel_mean_xy[1] / span_y], dtype=np.float32)
+        rel_norm = np.clip(rel_norm, -1.0, 1.0)
+        # map [-1, 1] -> [0, 1] to match current vector feature scaling
+        return (rel_norm * 0.5 + 0.5).astype(np.float32)
+
+    def get_obs_vector_single(self, dynamic_model, model_idx=None):
         image = self.get_depth_image(client=dynamic_model.client, vehicle_name=getattr(dynamic_model, 'vehicle_name', ''))
         self.min_distance_to_obstacles_all.append(image.min())
         image_scaled = np.clip(image, 0, self.max_depth_meters) / self.max_depth_meters * 255
@@ -1170,7 +1204,10 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
 
         img_feature = np.array(split_final) / 255.0
         state_feature = dynamic_model._get_state_feature() / 255
-        feature_all = np.concatenate((img_feature, state_feature), axis=0)
+        if model_idx is None:
+            model_idx = 0
+        teammate_feature = self.get_pursuit_teammate_features(model_idx)
+        feature_all = np.concatenate((img_feature, state_feature, teammate_feature), axis=0)
         feature_all = np.reshape(feature_all, (1, len(feature_all)))
         return feature_all
 
@@ -1787,11 +1824,11 @@ class AirsimGymEnv(gym.Env, QtCore.QThread):
             if self.control_role == 'pursuer':
                 # End episode if either side fails, but reward attribution stays role-specific
                 # in compute_pursuit_reward().
-                episode_done = caught or pursuer_failed or evader_failed or timeout
+                episode_done = caught or pursuer_failed or timeout
                 return episode_done
             if self.control_role == 'evader':
                 # Symmetric termination for cleaner training trajectories.
-                episode_done = caught or evader_failed or pursuer_failed or timeout
+                episode_done = caught or pursuer_failed or timeout
                 return episode_done
 
         is_not_inside_workspace_now = self.is_not_inside_workspace()
